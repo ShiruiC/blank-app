@@ -2,13 +2,13 @@
 import streamlit as st
 st.set_page_config(page_title="EHR SYSTEM", page_icon="🏥", layout="wide")
 
-from utils import init_state, render_sidebar, header
+from utils import init_state, render_sidebar, header, reset_on_landing
 init_state()
 render_sidebar(current_file=__file__)
+reset_on_landing()
 
 
-
-header("Landing Page", "Welcome to the ED decision-support workspace.")
+header("EHR System", "Welcome to the ED decision-support workspace.")
 
 colA, colB = st.columns(2)
 with colA:
