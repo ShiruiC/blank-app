@@ -16,11 +16,11 @@ from components.patient_view import make_patient_from_row, compute_summary, rend
 # ───────── Demo fallback profiles (only used if no trackboard_df available) ─────────
 FIXED_PROFILES = {
     "CP-1000": {"MRN":"CP-1000","Patient":"Weber, Charlotte","Age":27,"Sex":"Female","ESI":2,
-                "HR":78,"SBP":164,"SpO₂":96,"Temp":"98.6°F","ECG":"Normal","hs-cTn (ng/L)":None,
+                "HR":78,"SBP":164,"SpO₂":96,"TempC": 37.0, "Temp": "37.0°C","ECG":"Normal","hs-cTn (ng/L)":None,
                 "OnsetMin":90,"CC":"Chest pain at rest, mild SOB.","Arrival":"10:39", "DOB":"—",
                 "point_risk":33,"ci_low":29,"ci_high":37,"drivers":"All vitals & ECG reassuring"},
     "CP-1001": {"MRN":"CP-1001","Patient":"Green, Gary","Age":59,"Sex":"Male","ESI":3,
-                "HR":102,"SBP":138,"SpO₂":95,"Temp":"99.1°F","ECG":"Borderline","hs-cTn (ng/L)":0.03,
+                "HR":102,"SBP":138,"SpO₂":95,"TempC": 37.0, "Temp": "37.0°C","ECG":"Borderline","hs-cTn (ng/L)":0.03,
                 "OnsetMin":60,"CC":"Intermittent chest tightness with exertion.","Arrival":"11:07","DOB":"—",
                 "point_risk":21,"ci_low":16,"ci_high":27,"drivers":"ECG slightly abnormal; vitals fair"},
 }
@@ -104,10 +104,11 @@ def general_info_block(state: dict) -> dict:
         state["HR"]   = b1.text_input("HR", str(state.get("HR","")))
         state["SBP"]  = b2.text_input("SBP", str(state.get("SBP","")))
         state["SpO₂"] = b3.text_input("SpO₂", str(state.get("SpO₂","")))
-        # Temperature (°C) with auto-convert from any input
-        temp_c_val = temp_to_celsius(state.get("Temp", state.get("TempC","")))
-        state["TempC"] = b4.text_input("Temp (°C)", "" if temp_c_val=="" else temp_c_val)
-        state["Temp"]  = f"{state['TempC']}°C" if state.get("TempC") not in (None,"","None") else ""
+        # Temperature (°C) 
+        patient_dict = st.session_state.get("selected_patient", {})  
+        seed_temp_c = state.get("TempC") or patient_dict.get("TempC")
+        state["TempC"] = b4.text_input("Temp (°C)", "" if seed_temp_c in (None,"") else f"{float(seed_temp_c):.1f}")
+        state["Temp"]  = f"{state['TempC']}°C" if state.get("TempC") else ""
 
         cL,cR = st.columns(2)
         state["ECG"] = cL.text_input("ECG", str(state.get("ECG","")))
@@ -198,16 +199,35 @@ def render_patient_chart():
             "CC": base.get("CC"),
             "SBP": base.get("SBP"), "DBP": 80, "HR": base.get("HR"), "RR": 18,
             "SpO₂": base.get("SpO₂"), "ECG": base.get("ECG"),
-            "hs-cTn (ng/L)": base.get("hs-cTn (ng/L)"), "TempF": 98.6,
+            "hs-cTn (ng/L)": base.get("hs-cTn (ng/L)"), 
+            "TempC": base.get("TempC", 37.0),          # use the Track Board’s TempC
+            "Temp":  f"{base.get('TempC', 37.0):.1f}°C",
         })
+
+        # --- derive Celsius for the UI (compute first, outside any dict) ---
+    tempC = None
+    try:
+        v = patient["vitals"]
+        if v.get("TempC") not in (None, "", "None"):
+            tempC = float(v["TempC"])
+        elif v.get("TempF") not in (None, "", "None"):
+            tempC = (float(v["TempF"]) - 32.0) * 5.0 / 9.0
+    except Exception:
+        tempC = None
 
     # Header + editable general info
     view = patient_header(name, patient["mrn"], default_view="Clinicians")
     edited = general_info_block({
         "Patient": name, "MRN": patient["mrn"],
         "Age": patient["age"], "Sex": patient["sex"], "ESI": "",
-        "HR": patient["vitals"]["HR"], "SBP": patient["vitals"]["BP"].split("/")[0],
-        "SpO₂": patient["vitals"]["SpO2"], "Temp": f"{patient['vitals']['TempF']}",
+        "HR": patient["vitals"]["HR"],
+        "SBP": patient["vitals"]["BP"].split("/")[0],
+        "SpO₂": patient["vitals"]["SpO2"],
+
+        # ✅ pass Celsius so the Temp (°C) field pre-fills
+        "TempC": "" if tempC is None else f"{tempC:.1f}",
+        "Temp":  "" if tempC is None else f"{tempC:.1f}°C",
+
         "ECG": "Normal" if not patient["risk_inputs"]["ecg_abnormal"] else "Abnormal",
         "hs-cTn (ng/L)": patient["risk_inputs"].get("troponin"),
         "OnsetMin": patient["data_quality"]["time_from_onset_min"],

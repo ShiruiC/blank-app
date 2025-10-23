@@ -36,14 +36,18 @@ def demo_rows(n=10):
             "Age": 27, "Sex": "Female",
             "ESI": 2, "HR": 78, "SBP": 164, "SpO₂": 96,
             "ECG": "Normal", "hs-cTn (ng/L)": None,
-            "OnsetMin": 90, "CC": "Chest pain at rest, mild SOB."
+            "OnsetMin": 90, "CC": "Chest pain at rest, mild SOB.",
+            "TempC": 37.0,
+            "Temp": "37.0°C",
         },
         "CP-1001": {  # Mark 对应的示例（可改名）
             "Patient": "Green, Gary",
             "Age": 59, "Sex": "Male",
             "ESI": 3, "HR": 141, "SBP": 109, "SpO₂": 91,
             "ECG": "Normal", "hs-cTn (ng/L)": 0.0,  # 初到院未升高（演示）
-            "OnsetMin": 30, "CC": "Severe chest pressure radiating to left arm, nausea, diaphoresis."
+            "OnsetMin": 30, "CC": "Severe chest pressure radiating to left arm, nausea, diaphoresis.",
+            "TempC": 37.0,
+            "Temp": "37.0°C",
         },
     }
 
@@ -58,6 +62,9 @@ def demo_rows(n=10):
         ecg_flags = np.random.choice(["ST/T abn","Normal","Nonspecific"], p=[0.25,0.5,0.25])
         hsctn = None if troponin_missing else round(max(0, np.random.normal(12, 18)),1)
 
+        # ✅ generate Celsius for everyone
+        temp_c = round(np.random.normal(37.0, 0.5), 1)
+
         row = {
             "PatientID": pid,
             "Arrival": (now - timedelta(minutes=np.random.randint(3, 120))).strftime("%H:%M"),
@@ -68,7 +75,10 @@ def demo_rows(n=10):
             "ECG": ecg_flags, "hs-cTn (ng/L)": hsctn,
             "OnsetMin": np.random.randint(15, 180),
             "CC": "Chest pain.",
-            "Room": np.random.choice(["WRM","Pod A","Pod B","Fast Track"], p=[0.4,0.3,0.2,0.1])
+            "Room": np.random.choice(["WRM","Pod A","Pod B","Fast Track"], p=[0.4,0.3,0.2,0.1]),
+            "TempC": temp_c,                  # ✅ numeric for logic
+            "Temp": f"{temp_c:.1f}°C",        # ✅ pretty string for display
+
         }
 
         # ✅ 如果在固定名单里，就用固定资料覆盖随机值
@@ -208,12 +218,14 @@ grid = AgGrid(
 
 sel = grid.get("selected_rows", [])
 if isinstance(sel, list) and len(sel) > 0:
-    pid = sel[0]["PatientID"]
-    name = sel[0]["Patient"]
+    row  = sel[0]                                # the full selected row
+    pid  = row["PatientID"]
+    name = row["Patient"]
+
     st.session_state["selected_patient_id"] = pid
     st.session_state["selected_patient_name"] = name
+    st.session_state["selected_patient"] = row   
 
-    # Navigate if your Streamlit has switch_page; otherwise show a link
     try:
         st.switch_page("pages/2_Patient_Chart.py")
     except Exception:
