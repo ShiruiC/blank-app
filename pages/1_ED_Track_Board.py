@@ -5,7 +5,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+from st_aggrid import AgGrid, GridOptionsBuilder
+from st_aggrid.shared import GridUpdateMode, DataReturnMode
 
 st.set_page_config(
     page_title="ED Track Board — Chest Pain",
@@ -28,23 +29,54 @@ def demo_rows(n=10):
     names = ["Weber, Charlotte","Green, Gary","Brown, Beverly","Busch, Amelia",
              "Johnson, Sally","Adams, Devin","Morales, Miles","Crown, Emma",
              "Pink, Patsy","Schmidt, Jonas"]
+    
+    FIXED_PROFILES = {
+        "CP-1000": {  # Olivia 对应的示例（可改名）
+            "Patient": "Weber, Charlotte",
+            "Age": 27, "Sex": "Female",
+            "ESI": 2, "HR": 78, "SBP": 164, "SpO₂": 96,
+            "ECG": "Normal", "hs-cTn (ng/L)": None,
+            "OnsetMin": 90, "CC": "Chest pain at rest, mild SOB."
+        },
+        "CP-1001": {  # Mark 对应的示例（可改名）
+            "Patient": "Green, Gary",
+            "Age": 59, "Sex": "Male",
+            "ESI": 3, "HR": 141, "SBP": 109, "SpO₂": 91,
+            "ECG": "Normal", "hs-cTn (ng/L)": 0.0,  # 初到院未升高（演示）
+            "OnsetMin": 30, "CC": "Severe chest pressure radiating to left arm, nausea, diaphoresis."
+        },
+    }
+
     rows = []
     for i in range(n):
+        pid = f"CP-{1000+i}"
         troponin_missing = np.random.rand() < 0.35
-        hr = int(np.random.normal(84, 18))
+        hr  = int(np.random.normal(84, 18))
         sbp = int(np.random.normal(132, 22))
         spo2 = int(np.clip(np.random.normal(96, 3), 85, 100))
         esis = np.random.choice([2,3,4], p=[0.2,0.55,0.25])
         ecg_flags = np.random.choice(["ST/T abn","Normal","Nonspecific"], p=[0.25,0.5,0.25])
         hsctn = None if troponin_missing else round(max(0, np.random.normal(12, 18)),1)
-        rows.append({
-            "PatientID": f"CP-{1000+i}",
+
+        row = {
+            "PatientID": pid,
             "Arrival": (now - timedelta(minutes=np.random.randint(3, 120))).strftime("%H:%M"),
             "Patient": names[i % len(names)],
+            "Age": int(np.random.normal(52, 18)),
+            "Sex": np.random.choice(["Male","Female"]),
             "ESI": esis, "HR": hr, "SBP": sbp, "SpO₂": spo2,
             "ECG": ecg_flags, "hs-cTn (ng/L)": hsctn,
+            "OnsetMin": np.random.randint(15, 180),
+            "CC": "Chest pain.",
             "Room": np.random.choice(["WRM","Pod A","Pod B","Fast Track"], p=[0.4,0.3,0.2,0.1])
-        })
+        }
+
+        # ✅ 如果在固定名单里，就用固定资料覆盖随机值
+        if pid in FIXED_PROFILES:
+            row.update(FIXED_PROFILES[pid])
+
+        rows.append(row)
+
     return pd.DataFrame(rows)
 
 df = demo_rows(10)
@@ -140,6 +172,11 @@ if "Confidence" in show_cols and "Conf" not in final_cols:
 disp_for_grid = disp[["PatientID"] + final_cols].copy()
 
 # ───────── AgGrid config: click Patient to open ─────────
+# ✅ 让患者页能读到当前板上的数据
+st.session_state["trackboard_df"] = df          # 或者存 work/disp，看患者页需要的列
+st.session_state.setdefault("selected_patient_id", None)
+st.session_state.setdefault("selected_patient_name", None)
+
 gb = GridOptionsBuilder.from_dataframe(disp_for_grid)
 gb.configure_grid_options(
     rowSelection="single",
@@ -157,26 +194,31 @@ for col, w in [("Room",110),("Arrival",100),("ESI",70),("HR",80),("SBP",90),("Sp
     if col in disp_for_grid.columns:
         gb.configure_column(col, width=w)
 
+# ... gb config ...
+
 grid = AgGrid(
     disp_for_grid,
     gridOptions=gb.build(),
-    update_mode=GridUpdateMode.SELECTION_CHANGED,
+    update_mode=GridUpdateMode.MODEL_CHANGED | GridUpdateMode.SELECTION_CHANGED,
+    data_return_mode=DataReturnMode.FILTERED_AND_SORTED,  # selection returns a list
     allow_unsafe_jscode=False,
     theme="streamlit",
-    # height=520,
-    fit_columns_on_grid_load=False
+    fit_columns_on_grid_load=False,
 )
 
 sel = grid.get("selected_rows", [])
-if sel:
-    # row selected — treat as "clicked patient"
-    selected_row = sel[0]
-    # persist full record (join back to original via PatientID for safety)
-    pid = selected_row["PatientID"]
-    full_row = disp.loc[disp["PatientID"]==pid].iloc[0].to_dict()
-    st.session_state["selected_patient"] = full_row
+if isinstance(sel, list) and len(sel) > 0:
+    pid = sel[0]["PatientID"]
+    name = sel[0]["Patient"]
     st.session_state["selected_patient_id"] = pid
-    st.switch_page("pages/2_Patient_Chart.py")
+    st.session_state["selected_patient_name"] = name
+
+    # Navigate if your Streamlit has switch_page; otherwise show a link
+    try:
+        st.switch_page("pages/2_Patient_Chart.py")
+    except Exception:
+        st.success(f"Selected **{name}** ({pid}).")
+        st.page_link("pages/2_Patient_Chart.py", label="➡️ Open Patient Chart")
 
 # ───────── Legend ─────────
 with st.expander("Legend • Uncertainty & Action Rules", expanded=False):
