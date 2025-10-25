@@ -5,8 +5,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from st_aggrid import AgGrid, GridOptionsBuilder
+from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from st_aggrid.shared import GridUpdateMode, DataReturnMode
+
+# --- jump guard: if flagged, switch immediately and stop ---
+if st.session_state.get("__go_patient_chart__"):
+    st.session_state["__go_patient_chart__"] = False
+    # ✅ Switch by page LABEL (sidebar name) — more robust than file path
+    st.switch_page("Patient Chart")
+    st.stop()  # ensure nothing else renders
 
 st.set_page_config(
     page_title="ED Track Board — Chest Pain",
@@ -14,6 +21,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
 
 from utils import init_state, enter_page, show_back_top_right, render_sidebar
 init_state()
@@ -182,56 +190,104 @@ if "Confidence" in show_cols and "Conf" not in final_cols:
 disp_for_grid = disp[["PatientID"] + final_cols].copy()
 
 # ───────── AgGrid config: click Patient to open ─────────
-# ✅ 让患者页能读到当前板上的数据
+# 让患者页能读到当前板上的数据
 st.session_state["trackboard_df"] = df          # 或者存 work/disp，看患者页需要的列
 st.session_state.setdefault("selected_patient_id", None)
 st.session_state.setdefault("selected_patient_name", None)
 
 gb = GridOptionsBuilder.from_dataframe(disp_for_grid)
+
+# 0) 关闭编辑，防止“Invalid …”
+gb.configure_default_column(editable=False)
+
+# 1) 用官方的 selection 配置（比直接塞到 gridOptions 更稳）
+gb.configure_selection(selection_mode="single", use_checkbox=False)
+
+# 2) 其他关键选项：禁止点击进入编辑 + 指定唯一行ID（避免排序/过滤后选中丢失）
 gb.configure_grid_options(
-    rowSelection="single",
-    suppressRowClickSelection=False,   # clicking a cell selects the row
+    suppressClickEdit=True,
+    stopEditingWhenCellsLoseFocus=True,
     domLayout="autoHeight",
+    getRowId=JsCode("function(p){ return p.data.PatientID; }"),  # 关键：行唯一键
 )
-# make Patient look like a link
+# 3) 新增一个 "Open" 按钮列 —— 点击时只做“选中该行”
+open_btn_renderer = JsCode("""
+class BtnCellRenderer {
+  init(params){
+    this.params = params;
+    const e = document.createElement('button');
+    e.innerText = 'Open';
+    e.style.padding = '4px 10px';
+    e.style.cursor = 'pointer';
+    e.addEventListener('click', () => {
+      params.api.deselectAll();
+      params.api.selectNode(params.node, true); // 触发 selection changed
+    });
+    this.eGui = e;
+  }
+  getGui(){ return this.eGui; }
+}
+""")
+
+# 在 DataFrame 里加一列占位（显示按钮）
+if "Open" not in disp_for_grid.columns:
+    disp_for_grid.insert(1, "Open", "Open")
+
+gb.configure_column("Open", header_name="", width=90,
+                    editable=False, cellRenderer=open_btn_renderer)
+
+# 4) 外观
 gb.configure_column("Patient", cellStyle={"color":"#1f77b4","textDecoration":"underline","cursor":"pointer"})
-# shrink internal ID
 gb.configure_column("PatientID", header_name="ID", width=90)
-
-# column widths: a bit nicer
-for col, w in [("Room",110),("Arrival",100),("ESI",70),("HR",80),("SBP",90),("SpO₂",90),("ECG",120),
-               ("hs-cTn (ng/L)",130),("Risk",140),("Conf",120),("Next Steps",340)]:
-    if col in disp_for_grid.columns:
-        gb.configure_column(col, width=w)
-
-# ... gb config ...
+# …列宽循环保持不变…
 
 grid = AgGrid(
     disp_for_grid,
     gridOptions=gb.build(),
-    update_mode=GridUpdateMode.MODEL_CHANGED | GridUpdateMode.SELECTION_CHANGED,
-    data_return_mode=DataReturnMode.FILTERED_AND_SORTED,  # selection returns a list
-    allow_unsafe_jscode=False,
+    update_mode=GridUpdateMode.SELECTION_CHANGED,      # 选中变化就回传
+    data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+    allow_unsafe_jscode=True,
     theme="streamlit",
     fit_columns_on_grid_load=False,
+    key="track_board_grid_v3"
 )
 
-sel = grid.get("selected_rows", [])
-if isinstance(sel, list) and len(sel) > 0:
-    row  = sel[0]                                # the full selected row
+resp = grid  # (AgGrid(...) return)
+
+sel_raw = resp.get("selected_rows")
+if sel_raw is None:
+    sel = []
+elif isinstance(sel_raw, pd.DataFrame):
+    # convert DF -> list[dict] to match the rest of your code
+    sel = sel_raw.to_dict("records")
+else:
+    sel = sel_raw  # already a list
+
+st.caption(f"DEBUG selected_rows_type: {type(sel).__name__} • count: {len(sel)}")
+
+if sel:
+    row  = sel[0]
     pid  = row["PatientID"]
     name = row["Patient"]
 
     st.session_state["selected_patient_id"] = pid
     st.session_state["selected_patient_name"] = name
-    st.session_state["selected_patient"] = row   
+    st.session_state["selected_patient"] = row
 
-    try:
-        st.switch_page("pages/2_Patient_Chart.py")
-    except Exception:
-        st.success(f"Selected **{name}** ({pid}).")
-        st.page_link("pages/2_Patient_Chart.py", label="➡️ Open Patient Chart")
+    if st.session_state.get("_last_opened_id") != pid:
+        st.session_state["_last_opened_id"] = pid
+        st.session_state["__go_patient_chart__"] = True   # 让顶部守卫去跳页
+        st.rerun()
 
+    # if st.session_state.get("_last_opened_id") != pid:
+    #     st.session_state["_last_opened_id"] = pid
+    #     try:
+    #         st.switch_page("pages/2_Patient_Chart.py")
+    #     except Exception as e:
+    #         st.info(f"Selected **{name}** ({pid}).")
+    #         st.page_link("pages/2_Patient_Chart.py", label="➡️ Open Patient Chart", icon="🩺")
+    #         st.caption(f"(Hint: run **streamlit_app.py** as the entrypoint. {type(e).__name__}: {e})")
+    
 # ───────── Legend ─────────
 with st.expander("Legend • Uncertainty & Action Rules", expanded=False):
     st.markdown("""

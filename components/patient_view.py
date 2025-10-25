@@ -1,6 +1,4 @@
 # components/patient_view.py
-# → No page_config, no page title. This is a pure component library.
-
 import math
 from datetime import datetime
 import streamlit as st
@@ -81,7 +79,6 @@ def next_steps_plan(base: float, width: float, critical: bool):
         steps.insert(0, "⚠️ Estimate uncertain → prioritize missing data / repeat tests before disposition.")
     return steps
 
-# Build a patient dict from a Track Board row (IDs/columns may vary by app)
 def make_patient_from_row(row: dict):
     def _get(k, default=None):
         v = row.get(k, default)
@@ -130,7 +127,6 @@ def make_patient_from_row(row: dict):
         },
     }
 
-# Compute a summary once; reuse in either view mode
 def compute_summary(p: dict):
     base = toy_risk_model(p["risk_inputs"])
     lo, hi, (conf_txt, conf_dot) = widen_interval(base, p["data_quality"])
@@ -147,24 +143,18 @@ def compute_summary(p: dict):
         "drivers": drivers, "steps": steps
     }
 
-# Small renderers used by the page controller
+# Role-specific panels (no duplicate metrics/risk/confidence here)
 def render_patient_panel(summary: dict):
-    st.markdown("### 👤 For the patient")
-    st.write("Think of risk like a **weather forecast**: right now it’s a **range** because some tests are still in progress.")
+    st.markdown("**What this means for you**")
     nf_mid, nf_lo, nf_hi = round(summary["base"]*100), round(summary["lo"]*100), round(summary["hi"]*100)
     st.markdown(
         f"- Out of **100** people like you, about **{nf_mid}** might have a serious heart problem.\n"
         f"- A reasonable range for now is **{nf_lo}–{nf_hi} out of 100** until we get more results.\n"
-        "- Next steps: blood test (troponin), repeat ECG, monitoring, and doctor review."
+        "- We’ll follow the steps above (blood test, repeat ECG, monitoring)."
     )
     st.markdown("**What is affecting your risk:** " + ", ".join(summary["drivers"]))
 
 def render_clinician_panel(summary: dict):
-    st.markdown("### 🩺 For clinicians")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Point risk", pct(summary["base"]))
-    c2.metric("Interval width", f"{round(100*summary['width'])}%")
-    c3.metric("Confidence", summary["conf_txt"])
     st.markdown("**Primary drivers:** " + ", ".join(summary["drivers"]))
     with st.expander("Uncertainty explanation: quick list → detailed"):
         st.markdown(
