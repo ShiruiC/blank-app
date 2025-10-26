@@ -11,18 +11,21 @@ except Exception:
     _init_state = _no_op; _enter_page = _no_op; _show_back = _no_op; _render_sidebar = _no_op
 
 # Component toolkit (risk model + panel renderers)
-from components.patient_view import make_patient_from_row, compute_summary, render_patient_panel, render_clinician_panel
+from components.patient_view import (
+    make_patient_from_row, compute_summary,
+    triage_level_from_summary, disposition_from_summary,
+    render_patient_panel, render_clinician_panel,
+    decompose_uncertainty, sens_table, pct_tier
+)
 
 # ───────── Demo fallback profiles (only used if no trackboard_df available) ─────────
 FIXED_PROFILES = {
     "CP-1000": {"MRN":"CP-1000","Patient":"Weber, Charlotte","Age":27,"Sex":"Female","ESI":2,
                 "HR":78,"SBP":164,"SpO₂":96,"TempC": 37.0, "Temp": "37.0°C","ECG":"Normal","hs-cTn (ng/L)":None,
-                "OnsetMin":90,"CC":"Chest pain at rest, mild SOB.","Arrival":"10:39", "DOB":"—",
-                "point_risk":33,"ci_low":29,"ci_high":37,"drivers":"All vitals & ECG reassuring"},
+                "OnsetMin":90,"CC":"Chest pain at rest, mild SOB.","Arrival":"10:39", "DOB":"—"},
     "CP-1001": {"MRN":"CP-1001","Patient":"Green, Gary","Age":59,"Sex":"Male","ESI":3,
                 "HR":102,"SBP":138,"SpO₂":95,"TempC": 37.0, "Temp": "37.0°C","ECG":"Borderline","hs-cTn (ng/L)":0.03,
-                "OnsetMin":60,"CC":"Intermittent chest tightness with exertion.","Arrival":"11:07","DOB":"—",
-                "point_risk":21,"ci_low":16,"ci_high":27,"drivers":"ECG slightly abnormal; vitals fair"},
+                "OnsetMin":60,"CC":"Intermittent chest tightness with exertion.","Arrival":"11:07","DOB":"—"},
 }
 
 # ───────── Small helpers ─────────
@@ -33,7 +36,7 @@ def risk_band(point_risk: float) -> str:
     if r < 30: return "Moderate"
     return "High"
 
-TRACK_BOARD_PALETTE = {"High":"#DC2626","Moderate":"#F59E0B","Low":"#16A34A"}  # tweak to match your board
+TRACK_BOARD_PALETTE = {"High":"#DC2626","Moderate":"#F59E0B","Low":"#16A34A"}
 
 def risk_badge(point_risk: float, palette=None):
     band = risk_band(point_risk)
@@ -42,7 +45,7 @@ def risk_badge(point_risk: float, palette=None):
     color = colors.get(band, "#9CA3AF")
     st.markdown(
         f"""
-        <div style="display:flex;align-items:center;gap:.5rem;margin-top:.25rem;">
+        <div style="display:flex;align-items:center;gap:.5rem;">
           <span style="font-weight:600;">Risk band:</span>
           <span style="padding:.15rem .55rem;border-radius:999px;background:{color};color:white;font-weight:700;">
             {band}
@@ -52,24 +55,18 @@ def risk_badge(point_risk: float, palette=None):
     )
 
 def temp_to_celsius(value):
-    """Accepts 98.6, '98.6°F', '37 C', returns string like '37.0'."""
     if value is None: return ""
     s = str(value).strip().replace(" ", "")
     m = re.match(r"^(-?\d+(\.\d+)?)(°?[CFcf])?$", s)
     if not m:
-        try:
-            return f"{round(float(s),1)}"
-        except:
-            return ""
+        try: return f"{round(float(s),1)}"
+        except: return ""
     num = float(m.group(1))
     unit = (m.group(3) or "C").upper().replace("°","")
-    if unit == "F":
-        c = (num - 32.0) * 5.0 / 9.0
-    else:
-        c = num
+    c = (num - 32.0) * 5.0 / 9.0 if unit == "F" else num
     return f"{round(c,1)}"
 
-# ───────── UI bits (keep role toggle; remove on-page “For X” headers) ─────────
+# ───────── UI bits (header + unchanged basic info) ─────────
 def patient_header(name: str, mrn: str, default_view="Clinicians"):
     left, right = st.columns([0.70, 0.30], vertical_alignment="center")
     with left:
@@ -104,9 +101,7 @@ def general_info_block(state: dict) -> dict:
         state["HR"]   = b1.text_input("HR", str(state.get("HR","")))
         state["SBP"]  = b2.text_input("SBP", str(state.get("SBP","")))
         state["SpO₂"] = b3.text_input("SpO₂", str(state.get("SpO₂","")))
-        # Temperature (°C)
-        patient_dict = st.session_state.get("selected_patient", {})
-        seed_temp_c = state.get("TempC") or patient_dict.get("TempC")
+        seed_temp_c = state.get("TempC")
         state["TempC"] = b4.text_input("Temp (°C)", "" if seed_temp_c in (None,"") else f"{float(seed_temp_c):.1f}")
         state["Temp"]  = f"{state['TempC']}°C" if state.get("TempC") else ""
 
@@ -122,6 +117,11 @@ def general_info_block(state: dict) -> dict:
         state["CC"]       = st.text_area("Chief complaint", str(state.get("CC","")), height=70)
     return state
 
+def _pill(text, tone="#2563EB", inverse=False):
+    return f"<span style='border-radius:999px;padding:.25rem .6rem;border:1px solid {tone};" \
+           f"margin:.15rem;display:inline-block;" \
+           f"background:{tone if inverse else 'transparent'};color:{'white' if inverse else tone};font-weight:600'>{text}</span>"
+
 def _card(title: str, body: str):
     st.markdown(
         f"""
@@ -133,7 +133,7 @@ def _card(title: str, body: str):
         unsafe_allow_html=True
     )
 
-# ───────── Page renderer (controller) ─────────
+# ───────── Main page ─────────
 def render_patient_chart():
     _init_state(); _enter_page("Patient Chart"); _render_sidebar(__file__); _show_back("← Back")
 
@@ -141,43 +141,29 @@ def render_patient_chart():
     track_df = st.session_state.get("trackboard_df")
     st.session_state.setdefault("selected_patient_id", "CP-1000")
 
-    # ───────── Selector (robust against None/empty) ─────────
+    # Patient selector (robust)
     st.caption("Search / select a patient (type ID or name to filter)")
-
     options, id_list = [], []
-
     if track_df is not None and not track_df.empty:
         tmp = track_df.copy()
-        if "PatientID" in tmp.columns:
-            tmp["PatientID"] = tmp["PatientID"].astype(str)
-        if "Patient" in tmp.columns:
-            tmp["Patient"] = tmp["Patient"].astype(str).fillna("—")
+        if "PatientID" in tmp.columns: tmp["PatientID"] = tmp["PatientID"].astype(str)
+        if "Patient" in tmp.columns:   tmp["Patient"]   = tmp["Patient"].astype(str).fillna("—")
         tmp = tmp[tmp["PatientID"].notna() & (tmp["PatientID"] != "None")]
-
         for _, r in tmp.iterrows():
-            pid = str(r["PatientID"])
-            nm  = str(r.get("Patient", "—"))
-            options.append(f"{pid} — {nm}")
-            id_list.append(pid)
+            pid = str(r["PatientID"]); nm = str(r.get("Patient","—"))
+            options.append(f"{pid} — {nm}"); id_list.append(pid)
     else:
         for pid, d in FIXED_PROFILES.items():
-            nm = str(d.get("Patient", ""))
-            options.append(f"{pid} — {nm}")
-            id_list.append(pid)
+            options.append(f"{pid} — {d.get('Patient','')}"); id_list.append(pid)
 
     if not options:
-        st.error("No patients available.")
-        return
+        st.error("No patients available."); return
 
     current_id = st.session_state.get("selected_patient_id")
     if not current_id or str(current_id) not in id_list:
-        current_id = id_list[0]
-        st.session_state["selected_patient_id"] = current_id
-
-    try:
-        default_index = id_list.index(str(current_id))
-    except ValueError:
-        default_index = 0
+        current_id = id_list[0]; st.session_state["selected_patient_id"] = current_id
+    try: default_index = id_list.index(str(current_id))
+    except ValueError: default_index = 0
 
     selected_label = st.selectbox("", options, index=default_index)
     sel_id = selected_label.split(" — ")[0].strip()
@@ -186,8 +172,7 @@ def render_patient_chart():
     # Build the patient dict
     if track_df is not None and not track_df.empty:
         row = track_df.loc[track_df["PatientID"] == sel_id]
-        if row.empty:
-            row = track_df.iloc[[0]]
+        if row.empty: row = track_df.iloc[[0]]
         patient = make_patient_from_row(row.iloc[0].to_dict())
         name = str(row.iloc[0].get("Patient","—"))
     else:
@@ -201,55 +186,76 @@ def render_patient_chart():
             "SBP": base.get("SBP"), "DBP": 80, "HR": base.get("HR"), "RR": 18,
             "SpO₂": base.get("SpO₂"), "ECG": base.get("ECG"),
             "hs-cTn (ng/L)": base.get("hs-cTn (ng/L)"),
-            "TempC": base.get("TempC", 37.0),
-            "Temp":  f"{base.get('TempC', 37.0):.1f}°C",
+            "TempC": base.get("TempC", 37.0), "Temp":  f"{base.get('TempC', 37.0):.1f}°C",
         })
 
-    # derive Celsius for the UI
-    tempC = None
+    # derive Celsius for the UI (safe)
     try:
         v = patient["vitals"]
-        if v.get("TempC") not in (None, "", "None"):
-            tempC = float(v["TempC"])
-        elif v.get("TempF") not in (None, "", "None"):
-            tempC = (float(v["TempF"]) - 32.0) * 5.0 / 9.0
+        tempC = float(v["TempC"]) if v.get("TempC") not in (None,"","None") else None
     except Exception:
         tempC = None
 
-    # Header + editable general info (UNCHANGED structure)
+    # Header + BASIC INFO (unchanged structure)
     view = patient_header(name, patient["mrn"], default_view="Clinicians")
     _ = general_info_block({
         "Patient": name, "MRN": patient["mrn"],
         "Age": patient["age"], "Sex": patient["sex"], "ESI": "",
-        "HR": patient["vitals"]["HR"],
-        "SBP": patient["vitals"]["BP"].split("/")[0],
+        "HR": patient["vitals"]["HR"], "SBP": patient["vitals"]["BP"].split("/")[0],
         "SpO₂": patient["vitals"]["SpO2"],
-        "TempC": "" if tempC is None else f"{tempC:.1f}",
-        "Temp":  "" if tempC is None else f"{tempC:.1f}°C",
+        "TempC": "" if tempC is None else f"{tempC:.1f}", "Temp":  "" if tempC is None else f"{tempC:.1f}°C",
         "ECG": "Normal" if not patient["risk_inputs"]["ecg_abnormal"] else "Abnormal",
         "hs-cTn (ng/L)": patient["risk_inputs"].get("troponin"),
         "OnsetMin": patient["data_quality"]["time_from_onset_min"],
-        "Arrival": patient["arrival_mode"], "DOB": "—",
-        "CC": patient["chief_complaint"]
+        "Arrival": patient["arrival_mode"], "DOB": "—", "CC": patient["chief_complaint"]
     })
 
-    # Risk summary (from the component toolkit)
+    # Compute model summary
     summary = compute_summary(patient)
+    triage = triage_level_from_summary(summary)
+    default_disp = disposition_from_summary(summary)
 
-    # ───────── NEW: 1) AI Suggested Actions (first) ─────────
-    st.markdown("### 🤖 AI Suggested Next Actions")
+    # ======== TOP: AI RECOMMENDATIONS (Triage -> Disposition -> Next steps) ========
+    st.markdown("### AI Recommendations")
     with st.container(border=True):
-        cols = st.columns(2)
-        half = (len(summary["steps"]) + 1) // 2
-        left_list = summary["steps"][:half]
-        right_list = summary["steps"][half:]
-        with cols[0]:
-            for s in left_list: st.markdown(f"- {s}")
-        with cols[1]:
-            for s in right_list: st.markdown(f"- {s}")
+        # Row kept balanced 1:1
+        cA, cB = st.columns(2)
+        # TRIAGE (T1–T5)
+        with cA:
+            t_color = {"T1":"#DC2626","T2":"#F97316","T3":"#F59E0B","T4":"#22C55E","T5":"#10B981"}[triage["code"]]
+            st.markdown(
+                "<div style='font-weight:700;margin-bottom:6px'>Triage recommendation</div>"
+                + f"<div style='font-size:18px'>{_pill('TriageGO: ' + triage['code'], t_color, True)} "
+                + f"<span style='color:#6b7280'>{triage['label']}</span></div>",
+                unsafe_allow_html=True
+            )
+            st.caption(triage["desc"])
+        # DISPOSITION (4 tags)
+        with cB:
+            st.markdown("<div style='font-weight:700;margin-bottom:6px'>Disposition recommendation</div>", unsafe_allow_html=True)
+            opts = ["Confirm/Admit","Observe","Consult","Defer/Discharge"]
+            try:
+                choice = st.segmented_control("disp", opts, selection_mode="single",
+                                              default=default_disp, label_visibility="collapsed")
+            except Exception:
+                choice = st.radio("disp", opts, index=opts.index(default_disp), horizontal=True, label_visibility="collapsed")
+            st.session_state["disp_choice"] = choice
 
-    # ───────── NEW: 2) Risk (separate from confidence) ─────────
-    st.markdown("### 📈 Risk Estimate")
+        # NEXT STEPS
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        cols = st.columns(2)
+        suggested = summary["steps"]
+        half = (len(suggested)+1)//2
+        with cols[0]:
+            st.markdown("**Next steps (AI):**")
+            for s in suggested[:half]: st.markdown(f"- {s}")
+        with cols[1]:
+            st.markdown("&nbsp;")
+            for s in suggested[half:]: st.markdown(f"- {s}")
+        st.text_area("Add/adjust next steps (free text)", placeholder="hs-Troponin now; repeat per rule-out; observe with continuous vitals; reassess pain…", key="next_steps_free")
+
+    # ======== RISK (clear & compact) ========
+    st.markdown("### Risk Estimate")
     c1, c2, c3 = st.columns([0.35, 0.35, 0.30])
     with c1:
         _card("Point risk", f"<div style='font-size:22px;font-weight:700;'>{round(100*summary['base'])}%</div>")
@@ -260,34 +266,57 @@ def render_patient_chart():
                           "<div style='color:#6b7280;margin-top:4px'>Point = best estimate; Interval = uncertainty range.</div>")
     with c3:
         risk_badge(100*summary["base"], palette=TRACK_BOARD_PALETTE)
+    st.progress(min(0.99, summary["base"]))  # quick glance
 
-    # simple progress bar as an at-a-glance cue (kept)
-    st.progress(min(0.99, summary["base"]))
+    # ======== CONFIDENCE & UNCERTAINTY (with composition + two layers) ========
+    st.markdown("### Confidence & Uncertainty")
+    conf_col, det_col = st.columns([0.30, 0.70])
+    alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(summary, patient)
 
-    # ───────── NEW: 3) Confidence & Uncertainty Explanation ─────────
-    st.markdown("### 🧭 Confidence & Uncertainty")
-    conf_col, dr_col = st.columns([0.30, 0.70])
     with conf_col:
-        dot = summary["conf_dot"]
-        txt = summary["conf_txt"]
-        _card("Confidence level", f"<div style='font-size:22px;font-weight:700;'>{dot} {txt}</div>")
-        st.caption("Confidence is derived from interval width and data quality signals.")
-    with dr_col:
-        _card("Primary drivers", ", ".join(summary["drivers"]))
-        with st.expander("Uncertainty explanation (details)"):
-            st.markdown(
-                "- **Quick hints:** early presentation, missing key features, potential distribution shift.\n"
-                "- **Detailed:** interval widens with missing hs-troponin, early window (<90 min), and OOD flag; "
-                "confidence tiers: width ≤10% = high; ≤20% = medium; >20% = low."
-            )
+        _card("Confidence score",
+              f"<div style='font-size:22px;font-weight:700;'>{pct_tier(conf_score, conf_tier)}</div>"
+              "<div style='color:#6b7280;margin-top:4px'>Computed internally; shown in tiers for readability.</div>")
+        bars = f"""
+        <div style="display:flex;gap:.5rem;align-items:center;margin-top:.5rem">
+          <div style="min-width:92px">Aleatoric</div>
+          <div style="height:10px;background:#e5e7eb;border-radius:999px;flex:1;position:relative;">
+            <div style="height:10px;border-radius:999px;background:#60A5FA;width:{int(alea_pct)}%"></div>
+          </div><div style="min-width:42px;text-align:right">{int(alea_pct)}%</div>
+        </div>
+        <div style="display:flex;gap:.5rem;align-items:center;margin-top:.4rem">
+          <div style="min-width:92px">Epistemic</div>
+          <div style="height:10px;background:#e5e7eb;border-radius:999px;flex:1;position:relative;">
+            <div style="height:10px;border-radius:999px;background:#A78BFA;width:{int(epis_pct)}%"></div>
+          </div><div style="min-width:42px;text-align:right">{int(epis_pct)}%</div>
+        </div>
+        """
+        _card("Uncertainty composition", bars)
 
-    # Role-specific panels (now focused on wording; no duplicate risk/confidence)
+    with det_col:
+        # Clinical reasoning layer
+        _card("Clinical reasoning (why high/low risk?)",
+              "<b>Risk stratification</b>: combines simple clinical rule + model estimate.<br/>"
+              f"• Clinical rule: HEART-like score — <i>illustrative</i>.<br/>"
+              f"• Model estimate: {round(summary['base']*100)}% "
+              f"({round(summary['lo']*100)}–{round(summary['hi']*100)}%)<br/>"
+              f"<b>Contributing factors</b>: {', '.join(summary['drivers'])}.")
+        # Model reasoning layer
+        sens_html = sens_table()
+        _card("Model reliability (how reliable right now?)",
+              "• Data completeness: "
+              f"<b>{'High' if 'troponin' not in patient['data_quality']['missing'] else 'Medium/Low'}</b><br/>"
+              f"• Model familiarity: <b>{'Lower' if patient['data_quality'].get('ood') else 'Typical'}</b><br/>"
+              "• Prediction stability: <b>High</b> (small input changes → small output changes)."
+              f"<div style='margin-top:.25rem'>{sens_html}</div>")
+
+    # Role-specific explanation blocks (kept lean)
     if view == "Patient":
         render_patient_panel(summary)
     else:
         render_clinician_panel(summary)
 
-    # Document agreement / override (unchanged)
+    # ======== AGREEMENT / OVERRIDE ========
     st.divider()
     st.markdown("#### ✅ Document agreement / override")
     st.radio("Do you agree with the AI suggestion?", ["Yes", "No / Override"], horizontal=True, key="agree_radio")

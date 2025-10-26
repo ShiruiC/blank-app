@@ -1,14 +1,13 @@
 # components/patient_view.py
 import math
-from datetime import datetime
 import streamlit as st
 
 # ───────────────────────── Uncertainty-aware toy model ─────────────────────────
 def toy_risk_model(inputs: dict) -> float:
     score = 0.0
-    score += 0.015 * (inputs["age"] - 40)               # age
-    score += 0.15 if inputs["sex"] == 1 else 0.0        # 1=male, 0=female
-    score += 0.25 if inputs["ecg_abnormal"] else 0.0    # abnormal ECG
+    score += 0.015 * (inputs["age"] - 40)
+    score += 0.15 if inputs["sex"] == 1 else 0.0
+    score += 0.25 if inputs["ecg_abnormal"] else 0.0
     if inputs.get("troponin") is not None:
         score += 0.35 * min(1.0, max(0.0, (inputs["troponin"] / 0.04)))
     pf = inputs.get("pain_features", [])
@@ -108,6 +107,7 @@ def make_patient_from_row(row: dict):
             "HR": int(_get("HR", 80)),
             "RR": int(_get("RR", 18)),
             "SpO2": int(_get("SpO₂", _get("SpO2", 96))),
+            "TempC": float(_get("TempC", 37.0)),
             "TempF": float(_get("TempF", 98.6)),
         },
         "risk_inputs": {
@@ -140,10 +140,74 @@ def compute_summary(p: dict):
         "base": base, "lo": lo, "hi": hi, "width": width,
         "conf_txt": conf_txt, "conf_dot": conf_dot,
         "band": band_from_risk(base),
-        "drivers": drivers, "steps": steps
+        "drivers": drivers, "steps": steps, "critical": critical
     }
 
-# Role-specific panels (no duplicate metrics/risk/confidence here)
+# ====== New: Triage + Disposition rules (simple, tunable) ======
+def triage_level_from_summary(s: dict):
+    # map to T1–T5 based on risk & red flags
+    if s["critical"] or s["base"] >= 0.50:  # definite high risk or STEMI-like signals
+        return {"code":"T1", "label":"Immediate", "desc":"High risk for intensive care, emergency procedure, or mortality."}
+    if s["base"] >= 0.35:
+        return {"code":"T2", "label":"Emergent", "desc":"Elevated risk for intensive care, emergency procedure, or mortality."}
+    if s["base"] >= 0.20:
+        return {"code":"T3", "label":"Urgent", "desc":"Moderate risk of hospital admission or very low risk of intensive care."}
+    if s["base"] >= 0.10:
+        return {"code":"T4", "label":"Less urgent", "desc":"Low risk of hospital admission."}
+    return {"code":"T5", "label":"Non-urgent", "desc":"Fast-track; very low risk of admission."}
+
+def disposition_from_summary(s: dict):
+    if s["critical"] or s["base"] >= 0.40:
+        return "Confirm/Admit"
+    if s["base"] >= 0.20:
+        return "Observe"
+    if s["base"] >= 0.10:
+        return "Consult"
+    return "Defer/Discharge"
+
+# ====== New: Confidence score, aleatoric/epistemic split, tiers ======
+def decompose_uncertainty(summary: dict, patient: dict):
+    width = summary["width"]                     # driven by randomness + data gaps
+    # crude internal numeric score (0..1, higher = more confident)
+    conf_score = max(0.0, min(1.0, 1.0 - (width / 0.35)))
+    # aleatoric: proportional to width; epistemic: missing data + OOD + early window
+    miss = len(patient["data_quality"].get("missing", []))
+    early = 1 if patient["data_quality"].get("time_from_onset_min", 999) < 90 else 0
+    ood = 1 if patient["data_quality"].get("ood") else 0
+    epi_signal = 0.18*miss + 0.12*early + 0.20*ood  # bounded-ish
+    epi = min(0.80, max(0.0, epi_signal))
+    alea_raw = min(0.90, max(0.05, width / 0.35))
+    # normalize to 100% split
+    total = alea_raw + epi
+    alea = alea_raw / total if total > 0 else 0.5
+    epis = epi / total if total > 0 else 0.5
+    # map to bands (0–40 low, 40–70 med, 70–100 high)
+    if conf_score < 0.40: tier = "Low"
+    elif conf_score < 0.70: tier = "Medium"
+    else: tier = "High"
+    return alea*100, epis*100, conf_score, tier
+
+def pct_tier(score: float, tier: str):
+    return f"{round(score*100)}% <span style='color:#6b7280'>(<b>{tier}</b>)</span>"
+
+# ====== Mini sensitivity table (HTML for light footprint) ======
+def sens_table():
+    rows = [
+        ("HR",  "+5%", "+2%", "-1%"),
+        ("SBP", "+5%", "+0%", "+1%"),
+        ("SpO₂", "±5%", "+3%", "—"),
+    ]
+    html = ["<table style='width:100%;border-collapse:collapse;font-size:12px'>",
+            "<tr><th style='text-align:left;border-bottom:1px solid #e5e7eb'>Vital</th>"
+            "<th style='text-align:left;border-bottom:1px solid #e5e7eb'>Change</th>"
+            "<th style='text-align:left;border-bottom:1px solid #e5e7eb'>Output ↑</th>"
+            "<th style='text-align:left;border-bottom:1px solid #e5e7eb'>Output ↓</th></tr>"]
+    for r in rows:
+        html.append(f"<tr><td style='padding:2px 0'>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td></tr>")
+    html.append("</table>")
+    return "".join(html)
+
+# Role-specific panels
 def render_patient_panel(summary: dict):
     st.markdown("**What this means for you**")
     nf_mid, nf_lo, nf_hi = round(summary["base"]*100), round(summary["lo"]*100), round(summary["hi"]*100)
