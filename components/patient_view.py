@@ -1,4 +1,4 @@
-# components/patient_view.py
+#components/patient_view.py
 import math
 import streamlit as st
 
@@ -16,7 +16,7 @@ def toy_risk_model(inputs: dict) -> float:
     score += 0.05 if inputs.get("rf_smoker") else 0.0
     score += 0.03 if inputs.get("rf_htn") else 0.0
     score += 0.04 if inputs.get("rf_dm") else 0.0
-    risk = 1 / (1 + math.exp(- (score - 0.5)))
+    risk = 1 / (1 + math.exp(-(score - 0.5)))
     return float(min(0.98, max(0.01, risk)))
 
 def widen_interval(base_risk: float, data_quality: dict):
@@ -28,9 +28,12 @@ def widen_interval(base_risk: float, data_quality: dict):
     width = float(min(0.35, max(0.05, width)))
     lo = max(0.0, base_risk - width/2)
     hi = min(1.0, base_risk + width/2)
-    if (hi - lo) <= 0.10: conf = ("High", "🟢")
-    elif (hi - lo) <= 0.20: conf = ("Medium", "🟡")
-    else: conf = ("Low", "🟠")
+    if (hi - lo) <= 0.10:
+        conf = ("High", "🟢")
+    elif (hi - lo) <= 0.20:
+        conf = ("Medium", "🟡")
+    else:
+        conf = ("Low", "🟠")
     return lo, hi, conf
 
 def pct(p: float) -> str:
@@ -45,8 +48,10 @@ def band_from_risk(r: float) -> str:
 def drivers_from_inputs(p: dict):
     ri = p["risk_inputs"]; d = []
     d += ["Abnormal ECG"] if ri.get("ecg_abnormal") else []
-    if ri.get("troponin") is None: d += ["Troponin pending"]
-    elif ri["troponin"] >= 0.01: d += [f"Troponin {ri['troponin']:.3f} ng/mL"]
+    if ri.get("troponin") is None:
+        d += ["Troponin pending"]
+    elif ri["troponin"] >= 0.01:
+        d += [f"Troponin {ri['troponin']:.3f} ng/mL"]
     if "radiating" in ri.get("pain_features", []): d += ["Radiating pain"]
     if "crushing" in ri.get("pain_features", []): d += ["Crushing pressure"]
     if "diaphoresis" in ri.get("pain_features", []): d += ["Diaphoresis"]
@@ -143,45 +148,38 @@ def compute_summary(p: dict):
         "drivers": drivers, "steps": steps, "critical": critical
     }
 
-# ====== New: Triage + Disposition rules (simple, tunable) ======
+# ====== Triage + Disposition rules (simple, tunable) ======
 def triage_level_from_summary(s: dict):
-    # map to T1–T5 based on risk & red flags
-    if s["critical"] or s["base"] >= 0.50:  # definite high risk or STEMI-like signals
-        return {"code":"T1", "label":"Immediate", "desc":"High risk for intensive care, emergency procedure, or mortality."}
+    if s["critical"] or s["base"] >= 0.50:
+        return {"code": "T1", "label": "Immediate", "desc": "High risk for intensive care, emergency procedure, or mortality."}
     if s["base"] >= 0.35:
-        return {"code":"T2", "label":"Emergent", "desc":"Elevated risk for intensive care, emergency procedure, or mortality."}
+        return {"code": "T2", "label": "Emergent", "desc": "Elevated risk for intensive care, emergency procedure, or mortality."}
     if s["base"] >= 0.20:
-        return {"code":"T3", "label":"Urgent", "desc":"Moderate risk of hospital admission or very low risk of intensive care."}
+        return {"code": "T3", "label": "Urgent", "desc": "Moderate risk of hospital admission; very low risk of intensive care."}
     if s["base"] >= 0.10:
-        return {"code":"T4", "label":"Less urgent", "desc":"Low risk of hospital admission."}
-    return {"code":"T5", "label":"Non-urgent", "desc":"Fast-track; very low risk of admission."}
+        return {"code": "T4", "label": "Less urgent", "desc": "Low risk of hospital admission."}
+    return {"code": "T5", "label": "Non-urgent", "desc": "Fast-track; very low risk of admission."}
 
 def disposition_from_summary(s: dict):
-    if s["critical"] or s["base"] >= 0.40:
-        return "Confirm/Admit"
-    if s["base"] >= 0.20:
-        return "Observe"
-    if s["base"] >= 0.10:
-        return "Consult"
+    if s["critical"] or s["base"] >= 0.40: return "Confirm/Admit"
+    if s["base"] >= 0.20: return "Observe"
+    if s["base"] >= 0.10: return "Consult"
     return "Defer/Discharge"
 
-# ====== New: Confidence score, aleatoric/epistemic split, tiers ======
+# ====== Confidence score, aleatoric/epistemic split, tiers ======
 def decompose_uncertainty(summary: dict, patient: dict):
-    width = summary["width"]                     # driven by randomness + data gaps
-    # crude internal numeric score (0..1, higher = more confident)
+    width = summary["width"]
+    # internal score 0..1 (narrower interval → higher confidence)
     conf_score = max(0.0, min(1.0, 1.0 - (width / 0.35)))
-    # aleatoric: proportional to width; epistemic: missing data + OOD + early window
     miss = len(patient["data_quality"].get("missing", []))
     early = 1 if patient["data_quality"].get("time_from_onset_min", 999) < 90 else 0
     ood = 1 if patient["data_quality"].get("ood") else 0
-    epi_signal = 0.18*miss + 0.12*early + 0.20*ood  # bounded-ish
+    epi_signal = 0.18*miss + 0.12*early + 0.20*ood
     epi = min(0.80, max(0.0, epi_signal))
     alea_raw = min(0.90, max(0.05, width / 0.35))
-    # normalize to 100% split
     total = alea_raw + epi
     alea = alea_raw / total if total > 0 else 0.5
     epis = epi / total if total > 0 else 0.5
-    # map to bands (0–40 low, 40–70 med, 70–100 high)
     if conf_score < 0.40: tier = "Low"
     elif conf_score < 0.70: tier = "Medium"
     else: tier = "High"
@@ -190,24 +188,65 @@ def decompose_uncertainty(summary: dict, patient: dict):
 def pct_tier(score: float, tier: str):
     return f"{round(score*100)}% <span style='color:#6b7280'>(<b>{tier}</b>)</span>"
 
-# ====== Mini sensitivity table (HTML for light footprint) ======
+# ====== Extras used in the new layout ======
 def sens_table():
+    # Return a small HTML table describing sensitivity to ± changes
     rows = [
-        ("HR",  "+5%", "+2%", "-1%"),
-        ("SBP", "+5%", "+0%", "+1%"),
+        ("HR",  "+5%", "+2%",  "-1%"),
+        ("SBP", "+5%", "+0%",  "+1%"),
         ("SpO₂", "±5%", "+3%", "—"),
     ]
-    html = ["<table style='width:100%;border-collapse:collapse;font-size:12px'>",
-            "<tr><th style='text-align:left;border-bottom:1px solid #e5e7eb'>Vital</th>"
-            "<th style='text-align:left;border-bottom:1px solid #e5e7eb'>Change</th>"
-            "<th style='text-align:left;border-bottom:1px solid #e5e7eb'>Output ↑</th>"
-            "<th style='text-align:left;border-bottom:1px solid #e5e7eb'>Output ↓</th></tr>"]
-    for r in rows:
-        html.append(f"<tr><td style='padding:2px 0'>{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td></tr>")
-    html.append("</table>")
+    html = [
+        "<table style='width:100%;border-collapse:collapse;font-size:12px'>",
+        "<thead>",
+        "<tr>",
+        "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Vital</th>",
+        "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Change</th>",
+        "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Output ↑</th>",
+        "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Output ↓</th>",
+        "</tr>",
+        "</thead>",
+        "<tbody>",
+    ]
+    for v, delta, up, dn in rows:
+        html.append(
+            f"<tr><td style='padding:4px 0'>{v}</td>"
+            f"<td style='padding:4px 0'>{delta}</td>"
+            f"<td style='padding:4px 0'>{up}</td>"
+            f"<td style='padding:4px 0'>{dn}</td></tr>"
+        )
+    html.append("</tbody></table>")
     return "".join(html)
 
-# Role-specific panels
+def pattern_similarity(patient: dict) -> float:
+    """Toy 'similarity to ACS cluster' — purely illustrative."""
+    sim = 0.3
+    if patient["risk_inputs"].get("ecg_abnormal"): sim += 0.3
+    t = patient["risk_inputs"].get("troponin")
+    if t is not None:
+        sim += min(0.4, t / 0.04 * 0.4)
+    return float(min(0.98, max(0.02, sim)))
+
+def alea_reason(summary: dict, patient: dict) -> str:
+    w = summary["width"]
+    hints = []
+    if patient["data_quality"].get("time_from_onset_min", 999) < 90:
+        hints.append("early presentation (<90 min)")
+    if "troponin" in patient["data_quality"].get("missing", []):
+        hints.append("troponin pending")
+    if not hints: hints.append("physiologic variability in symptoms")
+    tier = "low" if w <= 0.10 else ("medium" if w <= 0.20 else "high")
+    return f"interval width suggests {tier} aleatoric uncertainty; drivers: {', '.join(hints)}."
+
+def epi_reason(summary: dict, patient: dict) -> str:
+    ood = patient["data_quality"].get("ood", False)
+    miss = patient["data_quality"].get("missing", [])
+    parts = []
+    parts.append("no OOD signals" if not ood else "slight distribution shift vs. training")
+    parts.append("no missing key data" if not miss else f"missing: {', '.join(miss)}")
+    return "Model familiarity & limits: " + "; ".join(parts)
+
+# ── Role-specific panels (concise; no duplicate metrics) ──
 def render_patient_panel(summary: dict):
     st.markdown("**What this means for you**")
     nf_mid, nf_lo, nf_hi = round(summary["base"]*100), round(summary["lo"]*100), round(summary["hi"]*100)
