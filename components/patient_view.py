@@ -1,6 +1,7 @@
 # components/patient_view.py
 import math
 import streamlit as st
+from typing import Dict
 
 # ───────────────────────── Uncertainty-aware toy model ─────────────────────────
 def toy_risk_model(inputs: dict) -> float:
@@ -9,7 +10,7 @@ def toy_risk_model(inputs: dict) -> float:
     score += 0.15 if inputs["sex"] == 1 else 0.0
     score += 0.25 if inputs["ecg_abnormal"] else 0.0
     if inputs.get("troponin") is not None:
-        score += 0.35 * min(1.0, max(0.0, (inputs["troponin"] / 0.04)))
+        score += 0.35 * min(1.0, max(0.0), (inputs["troponin"] / 0.04))
     pf = inputs.get("pain_features", [])
     score += 0.1 if "radiating" in pf else 0.0
     score += 0.08 if "crushing" in pf else 0.0
@@ -146,7 +147,6 @@ def compute_summary(p: dict):
         "conf_txt": conf_txt, "conf_dot": conf_dot,
         "band": band_from_risk(base),
         "drivers": drivers, "steps": steps, "critical": critical,
-        # 可选：给“Detected diagnosis”显示的文本
         "suspected_condition": "ACS-like"
     }
 
@@ -171,7 +171,6 @@ def disposition_from_summary(s: dict):
 # ====== Confidence score, aleatoric/epistemic split, tiers ======
 def decompose_uncertainty(summary: dict, patient: dict):
     width = summary["width"]
-    # internal score 0..1 (narrower interval → higher confidence)
     conf_score = max(0.0, min(1.0, 1.0 - (width / 0.35)))
     miss = len(patient["data_quality"].get("missing", []))
     early = 1 if patient["data_quality"].get("time_from_onset_min", 999) < 90 else 0
@@ -217,7 +216,6 @@ def sens_table():
     return "".join(html)
 
 def pattern_similarity(patient: dict) -> float:
-    """Toy 'similarity to ACS cluster' — purely illustrative."""
     sim = 0.3
     if patient["risk_inputs"].get("ecg_abnormal"): sim += 0.3
     t = patient["risk_inputs"].get("troponin")
@@ -256,13 +254,10 @@ def render_patient_panel(summary: dict):
     st.markdown("**What is affecting your risk:** " + ", ".join(summary["drivers"]))
 
 def render_clinician_panel(summary: dict):
-    """Clinician panel intentionally left empty."""
     return
 
 # ───────────────────── Confidence & Uncertainty renderer ──────────────────────
 def render_confidence_uncertainty(*, sum_dict: dict, patient: dict):
-    """按手绘布局渲染 C&U。页面里调用：render_confidence_uncertainty(sum_dict=summary, patient=patient)"""
-
     def _pct_int(x) -> int:
         try: return int(round(100*float(x)))
         except: return 0
@@ -308,13 +303,11 @@ def render_confidence_uncertainty(*, sum_dict: dict, patient: dict):
 
     with st.expander("Confidence & Uncertainty", expanded=False):
 
-        # derive numbers
         alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(sum_dict, patient)
         conf_pct = _pct_int(conf_score)
         unc_intensity = _uncertainty_intensity(conf_score)
         dom_type = "Aleatoric" if alea_pct >= epis_pct else "Epistemic"
 
-        # Row 1 — score + composition
         c1, c2 = st.columns([0.40, 0.60])
         with c1:
             st.markdown(
@@ -345,7 +338,6 @@ def render_confidence_uncertainty(*, sum_dict: dict, patient: dict):
 
         st.divider()
 
-        # Layer A — Clinical reasoning
         st.markdown("### Clinical reasoning layer — why this patient’s risk is high/low")
         a1, a2 = st.columns(2)
 
@@ -359,8 +351,7 @@ def render_confidence_uncertainty(*, sum_dict: dict, patient: dict):
                 f"<div style='display:flex;align-items:center;gap:.5rem'>"
                 f"<div style='font-size:22px;font-weight:800'>{base}%</div>{_risk_band_badge(base)}</div>"
                 f"<div style='color:#6b7280;margin-top:2px'>Point risk</div>"
-                f"<div style='margin-top:.5rem'><b>Interval:</b> {lo}% – {hi}% "
-                f"<span style='color:#6b7280'>(uncertainty range)</span></div>"
+                f"<div style='margin-top:.5rem'><b>Interval:</b> {lo}% – {hi}% <span style='color:#6b7280'>(uncertainty range)</span></div>"
                 f"<div style='margin-top:.5rem'><b>Contributing factors:</b> {chips}</div>",
                 unsafe_allow_html=True
             )
@@ -379,8 +370,8 @@ def render_confidence_uncertainty(*, sum_dict: dict, patient: dict):
         st.markdown(
             f"<div style='margin-top:.75rem;padding:.6rem .8rem;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa'>"
             f"<div style='display:flex;align-items:center;gap:.5rem;font-weight:700'>"
-            f"Uncertainty type — {dom_type} {_badge(unc_intensity, _tone(unc_intensity))}"
-            f"</div>"
+            f"Uncertainty type — {dom_type} "
+            f"{_badge(unc_intensity, _tone(unc_intensity))}</div>"
             f"<div style='margin-top:.35rem;color:#374151'><b>Drivers:</b> {clinical_reason}</div>"
             f"</div>",
             unsafe_allow_html=True
@@ -388,45 +379,33 @@ def render_confidence_uncertainty(*, sum_dict: dict, patient: dict):
 
         st.divider()
 
-        # Layer B — Model reasoning（一行三块）
         st.markdown("### Model reasoning layer — how much the model trusts itself")
         m1, m2, m3 = st.columns(3)
 
-        # Data completeness
         with m1:
             missing = (patient.get("data_quality", {}) or {}).get("missing", []) or []
             if not missing:
-                tag = _tier_badge("High"); info = _info_icon("No missing key data")
-                detail = "<span style='color:#6b7280'>No missing data</span>"
+                tag = _tier_badge("High"); detail = "<span style='color:#6b7280'>No missing data</span>"
             else:
                 tag = _tier_badge("Medium" if len(missing) <= 2 else "Low")
-                info = _info_icon("Missing inputs may reduce certainty")
                 chips = " ".join(_badge(m, "neutral") for m in missing)
                 detail = f"Missing: {chips}"
-            st.markdown(_h4("Data completeness") + f"<div>{tag}{info}</div><div style='margin-top:.4rem'>{detail}</div>",
+            st.markdown(_h4("Data completeness") + f"<div>{tag}</div><div style='margin-top:.4rem'>{detail}</div>",
                         unsafe_allow_html=True)
 
-        # Model familiarity
         with m2:
             dq = patient.get("data_quality", {}) or {}
             ood = dq.get("ood", False)
-            note = dq.get("age_note")
             if ood:
-                tag = _tier_badge("Low"); info = _info_icon(ood if isinstance(ood,str) else "Slight distribution shift vs. training data")
-                detail = "<span style='color:#6b7280'>Outside typical training range</span>"
+                tag = _tier_badge("Low"); detail = "<span style='color:#6b7280'>Outside typical training range</span>"
             else:
-                if note:
-                    tag = _tier_badge("Medium"); info = _info_icon(str(note)); detail = f"<span>{note}</span>"
-                else:
-                    tag = _tier_badge("High"); info = _info_icon("Typical for training distribution"); detail = "<span style='color:#6b7280'>Typical</span>"
-            st.markdown(_h4("Model familiarity") + f"<div>{tag}{info}</div><div style='margin-top:.4rem'>{detail}</div>",
+                tag = _tier_badge("High"); detail = "<span style='color:#6b7280'>Typical</span>"
+            st.markdown(_h4("Model familiarity") + f"<div>{tag}</div><div style='margin-top:.4rem'>{detail}</div>",
                         unsafe_allow_html=True)
 
-        # Prediction stability
         with m3:
             stab_tag = _tier_badge("High")
-            info = _info_icon("Consistent results across runs; small input changes → small output changes")
-            st.markdown(_h4("Prediction stability") + f"<div>{stab_tag}{info}</div>", unsafe_allow_html=True)
+            st.markdown(_h4("Prediction stability") + f"<div>{stab_tag}</div>", unsafe_allow_html=True)
             st.caption("Details:")
             st.markdown(f"<div style='margin-top:.2rem'>{sens_table()}</div>", unsafe_allow_html=True)
 
@@ -434,9 +413,57 @@ def render_confidence_uncertainty(*, sum_dict: dict, patient: dict):
         st.markdown(
             f"<div style='margin-top:.75rem;padding:.6rem .8rem;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa'>"
             f"<div style='display:flex;align-items:center;gap:.5rem;font-weight:700'>"
-            f"Uncertainty type — {dom_type} {_badge(unc_intensity, _tone(unc_intensity))}"
-            f"</div>"
+            f"Uncertainty type — {dom_type} "
+            f"{_badge(unc_intensity, _tone(unc_intensity))}</div>"
             f"<div style='margin-top:.35rem;color:#374151'><b>Drivers:</b> {model_reason}</div>"
             f"</div>",
             unsafe_allow_html=True
         )
+
+# ─────────────────────────── Tabs (NEW) ───────────────────────────
+def status_tabs(state: Dict) -> None:
+    """
+    Render overview tabs below the header: Current | History | Results.
+    Read-only; values are pulled from `state`.
+    """
+    tab1, tab2, tab3 = st.tabs(["Current", "History", "Results"])
+
+    with tab1:
+        st.subheader("Current Vitals")
+        c1, c2, c3, c4 = st.columns(4)
+        hr   = state.get("HR", "—")
+        sbp  = state.get("SBP", "—")
+        spo2 = state.get("SpO₂", state.get("SpO2", "—"))
+        tmp  = state.get("TempC", "—")
+
+        c1.metric("HR",   f"{hr} bpm"   if hr  != "—" else "—")
+        c2.metric("SBP",  f"{sbp} mmHg" if sbp != "—" else "—")
+        c3.metric("SpO₂", f"{spo2} %"   if spo2!= "—" else "—")
+        c4.metric("Temp", f"{tmp} °C"   if tmp != "—" else "—")
+
+        last = state.get("VitalsUpdated") or state.get("Arrival") or "—"
+        st.caption(f"Updated {last} • Stability/variance → aleatoric uncertainty")
+
+    with tab2:
+        st.subheader("Vital Trends")
+        st.info("Trend plots for HR / SBP / SpO₂ / Temp can be shown here. "
+                "Higher variance ⇒ ↑ aleatoric uncertainty; monitoring gaps ⇒ ↑ epistemic uncertainty.")
+
+    with tab3:
+        st.subheader("Results")
+        ecg = state.get("ECG", "—")
+        tro = state.get("hs-cTn (ng/L)", state.get("hs_cTn", "—"))
+        tro_time = state.get("TroponinTime", "—")
+
+        r1, r2 = st.columns(2)
+        with r1:
+            st.text_input("ECG (summary)", value=str(ecg), disabled=True)
+        with r2:
+            st.text_input("hs-cTn (ng/L)", value="" if tro in [None, "None"] else str(tro), disabled=True)
+            st.caption(f"Result time: {tro_time}")
+
+        missing = state.get("MissingKeyResults", [])
+        if missing:
+            st.warning("Missing for pathway: " + ", ".join(missing) + "  → ↑ epistemic uncertainty")
+        else:
+            st.success("Key results complete  → ↓ epistemic uncertainty")

@@ -1,6 +1,7 @@
 # pages/2_Patient_Chart.py
 import re
 import streamlit as st
+from typing import Dict
 from datetime import datetime
 from html import escape
 
@@ -15,11 +16,11 @@ except Exception:
 from components.patient_view import (
     make_patient_from_row, compute_summary,
     triage_level_from_summary, disposition_from_summary,
-    render_confidence_uncertainty,  # 仍可用作“一行渲染”的替代
+    render_confidence_uncertainty,
     render_patient_panel, render_clinician_panel,
     decompose_uncertainty, sens_table, pct_tier,
     pattern_similarity, alea_reason, epi_reason,
-    band_from_risk,  # 导入组件中的阈值函数（0..1）
+    band_from_risk,
 )
 
 # ───────── Demo fallback profiles ─────────
@@ -71,53 +72,103 @@ def _card(title: str, body: str):
     )
 
 # ───────── Header + basic info ─────────
-def patient_header(name: str, mrn: str, default_view="Clinicians"):
+def patient_header(name: str, mrn: str, default_view: str = "Clinicians") -> str:
     left, right = st.columns([0.70, 0.30], vertical_alignment="center")
     with left:
         st.markdown(f"## {name}")
         st.caption(f"MRN: {mrn}")
     with right:
-        view = st.radio("View", ["Patient","Clinicians"], horizontal=True,
-                        index=0 if default_view=="Patient" else 1,
-                        label_visibility="collapsed")
+        view = st.radio(
+            "View", ["Patient", "Clinicians"],
+            horizontal=True,
+            index=0 if default_view == "Patient" else 1,
+            label_visibility="collapsed",
+        )
     st.divider()
     return view
 
-def general_info_block(state: dict) -> dict:
+
+def status_tabs(state: Dict) -> None:
+    """Tabs that summarize live clinical status. Read-only; drives uncertainty."""
+    tab1, tab2, tab3 = st.tabs(["Current", "History", "Results"])
+
+    with tab1:
+        st.subheader("Current Vitals")
+        c1, c2, c3, c4 = st.columns(4)
+        hr   = state.get("HR", "—")
+        sbp  = state.get("SBP", "—")
+        spo2 = state.get("SpO₂", state.get("SpO2", "—"))
+        tmp  = state.get("TempC", "—")
+
+        c1.metric("HR",   f"{hr} bpm"   if hr  != "—" else "—")
+        c2.metric("SBP",  f"{sbp} mmHg" if sbp != "—" else "—")
+        c3.metric("SpO₂", f"{spo2} %"   if spo2!= "—" else "—")
+        c4.metric("Temp", f"{tmp} °C"   if tmp != "—" else "—")
+
+        last = state.get("VitalsUpdated") or state.get("Arrival") or "—"
+        st.caption(f"Updated {last} • stability/variance inform aleatoric uncertainty")
+
+    with tab2:
+        st.subheader("Vital Trends")
+        # Example placeholders: wire your own DataFrames here
+        # st.line_chart(vitals_history_df)
+        st.info("Trend plots go here (HR, SBP, SpO₂, Temp). "
+                "Higher variance ⇒ ↑ aleatoric uncertainty.")
+        coverage = state.get("MonitoringCoveragePct")
+        if coverage is not None:
+            st.caption(f"Monitoring coverage: {coverage}% (gaps increase epistemic uncertainty)")
+
+    with tab3:
+        st.subheader("Results")
+        # Keep results read-only here; edit elsewhere if needed.
+        ecg = state.get("ECG", "—")
+        tro = state.get("hs-cTn (ng/L)", state.get("hs_cTn", "—"))
+        tro_time = state.get("TroponinTime", "—")
+
+        r1, r2 = st.columns([0.5, 0.5])
+        with r1:
+            st.text_input("ECG (summary)", value=str(ecg), disabled=True)
+        with r2:
+            st.text_input("hs-cTn (ng/L)", value="" if tro in [None, "None"] else str(tro), disabled=True)
+            st.caption(f"Result time: {tro_time}")
+
+        # Optional completeness chip
+        missing = state.get("MissingKeyResults", [])
+        if missing:
+            st.warning("Missing for pathway: " + ", ".join(missing) + "  → ↑ epistemic uncertainty")
+        else:
+            st.success("Key results complete  → ↓ epistemic uncertainty")
+
+
+def general_info_block(state: Dict) -> Dict:
+    """Identity + demographics + complaint only (no live vitals/results fields)."""
     c1, c2 = st.columns([0.23, 0.77])
     with c1:
-        st.markdown("""
-        <div style="width:140px;height:140px;border-radius:50%;
-             background:linear-gradient(180deg,#edf2f7,#e2e8f0);
-             display:flex;align-items:center;justify-content:center;
-             font-size:48px;color:#6b7280;margin-bottom:8px;">👤</div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div style="width:140px;height:140px;border-radius:50%;
+                 background:linear-gradient(180deg,#edf2f7,#e2e8f0);
+                 display:flex;align-items:center;justify-content:center;
+                 font-size:48px;color:#6b7280;margin-bottom:8px;">👤</div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.caption("Photo placeholder")
+
     with c2:
-        a1,a2,a3,a4 = st.columns(4)
-        state["Patient"] = a1.text_input("Patient", str(state.get("Patient","")))
-        state["Age"]     = a2.text_input("Age", str(state.get("Age","")))
-        state["Sex"]     = a3.text_input("Sex", str(state.get("Sex","")))
-        state["ESI"]     = a4.text_input("ESI", str(state.get("ESI","")))
+        a1, a2, a3, a4 = st.columns(4)
+        state["Patient"] = a1.text_input("Patient", str(state.get("Patient", "")))
+        state["Age"]     = a2.text_input("Age", str(state.get("Age", "")))
+        state["Sex"]     = a3.text_input("Sex", str(state.get("Sex", "")))
+        state["ESI"]     = a4.text_input("ESI", str(state.get("ESI", "")))
 
-        b1,b2,b3,b4 = st.columns(4)
-        state["HR"]   = b1.text_input("HR", str(state.get("HR","")))
-        state["SBP"]  = b2.text_input("SBP", str(state.get("SBP","")))
-        state["SpO₂"] = b3.text_input("SpO₂", str(state.get("SpO₂","")))
-        seed_temp_c = state.get("TempC")
-        state["TempC"] = b4.text_input("Temp (°C)", "" if seed_temp_c in (None,"") else f"{float(seed_temp_c):.1f}")
-        state["Temp"]  = f"{state['TempC']}°C" if state.get("TempC") else ""
+        d1, d2, d3 = st.columns(3)
+        state["OnsetMin"] = d1.text_input("Onset (min)", str(state.get("OnsetMin", "")))
+        state["Arrival"]  = d2.text_input("Arrival", str(state.get("Arrival", "")))
+        state["DOB"]      = d3.text_input("DOB", str(state.get("DOB", "—")))
 
-        cL,cR = st.columns(2)
-        state["ECG"] = cL.text_input("ECG", str(state.get("ECG","")))
-        state["hs-cTn (ng/L)"] = cR.text_input("hs-cTn (ng/L)",
-            "" if state.get("hs-cTn (ng/L)") in [None,"None"] else str(state.get("hs-cTn (ng/L)")) )
+        state["CC"] = st.text_area("Chief complaint", str(state.get("CC", "")), height=70)
 
-        d1,d2,d3 = st.columns(3)
-        state["OnsetMin"] = d1.text_input("Onset (min)", str(state.get("OnsetMin","")))
-        state["Arrival"]  = d2.text_input("Arrival", str(state.get("Arrival","")))
-        state["DOB"]      = d3.text_input("DOB", str(state.get("DOB","—")))
-        state["CC"]       = st.text_area("Chief complaint", str(state.get("CC","")), height=70)
     return state
 
 # ───────── Main page ─────────
@@ -178,7 +229,9 @@ def render_patient_chart():
 
     # Header + BASIC INFO
     view = patient_header(name, patient["mrn"], default_view="Clinicians")
-    _ = general_info_block({
+
+    # ⬇️ 保存 general_info_block 返回值，并在其后渲染 Tabs（关键修复）
+    ui_state = general_info_block({
         "Patient": name, "MRN": patient["mrn"],
         "Age": patient["age"], "Sex": patient["sex"], "ESI": "",
         "HR": patient["vitals"]["HR"], "SBP": patient["vitals"]["BP"].split("/")[0],
@@ -188,8 +241,10 @@ def render_patient_chart():
         "ECG": "Normal" if not patient["risk_inputs"]["ecg_abnormal"] else "Abnormal",
         "hs-cTn (ng/L)": patient["risk_inputs"].get("troponin"),
         "OnsetMin": patient["data_quality"]["time_from_onset_min"],
-        "Arrival": patient["arrival_mode"], "DOB": "—", "CC": patient["chief_complaint"]
+        "Arrival": patient["arrival_mode"], "DOB": "—", "CC": patient["chief_complaint"],
+        "VitalsUpdated": st.session_state.get("VitalsUpdated", "")  # 可选：提供更新时间
     })
+    status_tabs(ui_state)  # ← 现在 Tabs 一定会显示
 
     # Compute summary
     summary = compute_summary(patient)
@@ -316,18 +371,14 @@ def render_patient_chart():
     def _h4(txt: str) -> str:
         return f'<div style="font-weight:700;font-size:15px;margin-bottom:.4rem">{txt}</div>'
 
-    # 容器，方便独立定制样式（可选）
     st.markdown('<div id="cu-block">', unsafe_allow_html=True)
 
     with st.expander("Confidence & Uncertainty", expanded=False):
-        # 关键数值
         alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(summary, patient)
         conf_pct = int(round(conf_score * 100))
-        # 与顶层 Confidence 同向：High/Medium/Low
         unc_intensity = {"High":"High", "Medium":"Moderate", "Low":"Low"}.get(conf_tier, "Moderate")
         dom_type = "Aleatoric" if alea_pct >= epis_pct else "Epistemic"
 
-        # 第一行：Confidence + Composition
         c1, c2 = st.columns([0.40, 0.60])
         with c1:
             st.markdown(
@@ -358,7 +409,6 @@ def render_patient_chart():
 
         st.divider()
 
-        # Clinical reasoning
         st.markdown(
             "### Clinical reasoning layer "
             "<span style='color:#6b7280;font-weight:500;font-size:1rem'>— why this patient’s risk is high/low</span>",
@@ -375,7 +425,6 @@ def render_patient_chart():
                 f"<div style='display:flex;align-items:center;gap:.5rem'>"
                 f"<div style='font-size:22px;font-weight:800'>{base}%</div>"
                 f"{risk_badge(base, palette=TRACK_BOARD_PALETTE)}</div>"
-                # 去掉“Point risk”行
                 f"<div style='margin-top:.5rem'><b>Interval:</b> {lo}% – {hi}% "
                 f"<span style='color:#6b7280'>(uncertainty range)</span></div>"
                 f"<div style='margin-top:.5rem'><b>Contributing factors:</b> {chips}</div>",
@@ -407,7 +456,6 @@ def render_patient_chart():
 
         st.divider()
 
-        # Model reasoning
         st.markdown(
             "### Model reasoning layer "
             "<span style='color:#6b7280;font-weight:500;font-size:1rem'>— how much the model trusts itself</span>",
