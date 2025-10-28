@@ -1,4 +1,4 @@
-#components/patient_view.py
+# components/patient_view.py
 import math
 import streamlit as st
 
@@ -145,7 +145,9 @@ def compute_summary(p: dict):
         "base": base, "lo": lo, "hi": hi, "width": width,
         "conf_txt": conf_txt, "conf_dot": conf_dot,
         "band": band_from_risk(base),
-        "drivers": drivers, "steps": steps, "critical": critical
+        "drivers": drivers, "steps": steps, "critical": critical,
+        # 可选：给“Detected diagnosis”显示的文本
+        "suspected_condition": "ACS-like"
     }
 
 # ====== Triage + Disposition rules (simple, tunable) ======
@@ -190,7 +192,6 @@ def pct_tier(score: float, tier: str):
 
 # ====== Extras used in the new layout ======
 def sens_table():
-    # Return a small HTML table describing sensitivity to ± changes
     rows = [
         ("HR",  "+5%", "+2%",  "-1%"),
         ("SBP", "+5%", "+0%",  "+1%"),
@@ -198,15 +199,12 @@ def sens_table():
     ]
     html = [
         "<table style='width:100%;border-collapse:collapse;font-size:12px'>",
-        "<thead>",
-        "<tr>",
+        "<thead><tr>",
         "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Vital</th>",
         "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Change</th>",
         "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Output ↑</th>",
         "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Output ↓</th>",
-        "</tr>",
-        "</thead>",
-        "<tbody>",
+        "</tr></thead><tbody>",
     ]
     for v, delta, up, dn in rows:
         html.append(
@@ -258,11 +256,187 @@ def render_patient_panel(summary: dict):
     st.markdown("**What is affecting your risk:** " + ", ".join(summary["drivers"]))
 
 def render_clinician_panel(summary: dict):
-    st.markdown("**Primary drivers:** " + ", ".join(summary["drivers"]))
-    with st.expander("Uncertainty explanation: quick list → detailed"):
+    """Clinician panel intentionally left empty."""
+    return
+
+# ───────────────────── Confidence & Uncertainty renderer ──────────────────────
+def render_confidence_uncertainty(*, sum_dict: dict, patient: dict):
+    """按手绘布局渲染 C&U。页面里调用：render_confidence_uncertainty(sum_dict=summary, patient=patient)"""
+
+    def _pct_int(x) -> int:
+        try: return int(round(100*float(x)))
+        except: return 0
+
+    def _badge(text, tone="info"):
+        colors = {
+            "success": ("#065f46", "#d1fae5"),
+            "warn":    ("#92400e", "#fef3c7"),
+            "danger":  ("#7f1d1d", "#fee2e2"),
+            "info":    ("#1e40af", "#dbeafe"),
+            "neutral": ("#374151", "#e5e7eb"),
+        }
+        fg, bg = colors.get(tone, colors["neutral"])
+        return f"<span style='display:inline-block;padding:2px 8px;border-radius:999px;font-weight:600;color:{fg};background:{bg};font-size:12px'>{text}</span>"
+
+    def _tier_badge(tier: str):
+        t = (tier or "").lower()
+        if t == "high":   return _badge("High", "success")
+        if t == "medium": return _badge("Medium", "warn")
+        return _badge("Low", "danger")
+
+    def _info_icon(tip: str):
+        safe = (tip or "").replace("'", "&#39;")
+        return f"<span title='{safe}' style='color:#6b7280;margin-left:6px'>ℹ️</span>"
+
+    def _h4(txt): 
+        return f"<div style='font-weight:700;font-size:15px;margin-bottom:.4rem'>{txt}</div>"
+
+    def _uncertainty_intensity(conf_score: float) -> str:
+        try: cs = float(conf_score)
+        except: cs = 0.5
+        if cs < 0.35:  return "High"
+        if cs < 0.70:  return "Moderate"
+        return "Low"
+
+    def _tone(level: str):
+        return {"High":"danger","Moderate":"warn","Low":"success"}.get(level, "neutral")
+
+    def _risk_band_badge(base_pct: int):
+        band = band_from_risk(base_pct/100.0)
+        tone = "success" if band in ["Low","Low-Moderate"] else ("warn" if band=="Moderate" else "danger")
+        return _badge(band, tone)
+
+    with st.expander("Confidence & Uncertainty", expanded=False):
+
+        # derive numbers
+        alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(sum_dict, patient)
+        conf_pct = _pct_int(conf_score)
+        unc_intensity = _uncertainty_intensity(conf_score)
+        dom_type = "Aleatoric" if alea_pct >= epis_pct else "Epistemic"
+
+        # Row 1 — score + composition
+        c1, c2 = st.columns([0.40, 0.60])
+        with c1:
+            st.markdown(
+                _h4("Confidence score") +
+                f"<div style='display:flex;align-items:baseline;gap:.5rem'>"
+                f"<div style='font-size:24px;font-weight:800'>{conf_pct}%</div>"
+                f"{_tier_badge(conf_tier)}</div>",
+                unsafe_allow_html=True
+            )
+        with c2:
+            bars = f"""
+            <div style="display:flex;gap:.5rem;align-items:center;margin-top:.2rem">
+              <div style="min-width:92px">Aleatoric</div>
+              <div style="height:10px;background:#e5e7eb;border-radius:999px;flex:1;position:relative;">
+                <div style="height:10px;border-radius:999px;background:#60A5FA;width:{int(alea_pct)}%"></div>
+              </div><div style="min-width:42px;text-align:right">{int(alea_pct)}%</div>
+            </div>
+            <div style="color:#6b7280;margin:4px 0 10px 92px">patient variability</div>
+            <div style="display:flex;gap:.5rem;align-items:center;">
+              <div style="min-width:92px">Epistemic</div>
+              <div style="height:10px;background:#e5e7eb;border-radius:999px;flex:1;position:relative;">
+                <div style="height:10px;border-radius:999px;background:#A78BFA;width:{int(epis_pct)}%"></div>
+              </div><div style="min-width:42px;text-align:right">{int(epis_pct)}%</div>
+            </div>
+            <div style="color:#6b7280;margin:4px 0 2px 92px">model limitation</div>
+            """
+            st.markdown(_h4("Uncertainty composition") + bars, unsafe_allow_html=True)
+
+        st.divider()
+
+        # Layer A — Clinical reasoning
+        st.markdown("### Clinical reasoning layer — why this patient’s risk is high/low")
+        a1, a2 = st.columns(2)
+
+        with a1:
+            lo, hi = _pct_int(sum_dict.get("lo", 0)), _pct_int(sum_dict.get("hi", 0))
+            base = _pct_int(sum_dict.get("base", 0))
+            drivers = sum_dict.get("drivers", []) or []
+            chips = " ".join(_badge(str(d), "neutral") for d in drivers) if drivers else "<span style='color:#6b7280'>—</span>"
+            st.markdown(
+                _h4("Risk") +
+                f"<div style='display:flex;align-items:center;gap:.5rem'>"
+                f"<div style='font-size:22px;font-weight:800'>{base}%</div>{_risk_band_badge(base)}</div>"
+                f"<div style='color:#6b7280;margin-top:2px'>Point risk</div>"
+                f"<div style='margin-top:.5rem'><b>Interval:</b> {lo}% – {hi}% "
+                f"<span style='color:#6b7280'>(uncertainty range)</span></div>"
+                f"<div style='margin-top:.5rem'><b>Contributing factors:</b> {chips}</div>",
+                unsafe_allow_html=True
+            )
+
+        with a2:
+            pr_sim = pattern_similarity(patient) or 0.0
+            suspected = sum_dict.get("suspected_condition", "ACS-like")
+            st.markdown(
+                _h4("Detected diagnosis / pattern recognition") +
+                f"<div><b>Similarity:</b> <span style='font-weight:800'>{_pct_int(pr_sim)}%</span>"
+                f" to <span style='font-weight:600'>{suspected}</span> cluster.</div>",
+                unsafe_allow_html=True
+            )
+
+        clinical_reason = alea_reason(sum_dict, patient) if dom_type == "Aleatoric" else epi_reason(sum_dict, patient)
         st.markdown(
-            "- **Quick list:** early presentation, missing key features, potential distribution shift.\n"
-            "- **Detailed:** interval widens with missing hs-troponin, early window (<90 min), and OOD flag; "
-            "confidence tiers: width ≤10% = high; ≤20% = medium; >20% = low. "
-            "This is a triage risk for **serious cardiac cause**; apply clinical judgment and local pathways."
+            f"<div style='margin-top:.75rem;padding:.6rem .8rem;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa'>"
+            f"<div style='display:flex;align-items:center;gap:.5rem;font-weight:700'>"
+            f"Uncertainty type — {dom_type} {_badge(unc_intensity, _tone(unc_intensity))}"
+            f"</div>"
+            f"<div style='margin-top:.35rem;color:#374151'><b>Drivers:</b> {clinical_reason}</div>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+        st.divider()
+
+        # Layer B — Model reasoning（一行三块）
+        st.markdown("### Model reasoning layer — how much the model trusts itself")
+        m1, m2, m3 = st.columns(3)
+
+        # Data completeness
+        with m1:
+            missing = (patient.get("data_quality", {}) or {}).get("missing", []) or []
+            if not missing:
+                tag = _tier_badge("High"); info = _info_icon("No missing key data")
+                detail = "<span style='color:#6b7280'>No missing data</span>"
+            else:
+                tag = _tier_badge("Medium" if len(missing) <= 2 else "Low")
+                info = _info_icon("Missing inputs may reduce certainty")
+                chips = " ".join(_badge(m, "neutral") for m in missing)
+                detail = f"Missing: {chips}"
+            st.markdown(_h4("Data completeness") + f"<div>{tag}{info}</div><div style='margin-top:.4rem'>{detail}</div>",
+                        unsafe_allow_html=True)
+
+        # Model familiarity
+        with m2:
+            dq = patient.get("data_quality", {}) or {}
+            ood = dq.get("ood", False)
+            note = dq.get("age_note")
+            if ood:
+                tag = _tier_badge("Low"); info = _info_icon(ood if isinstance(ood,str) else "Slight distribution shift vs. training data")
+                detail = "<span style='color:#6b7280'>Outside typical training range</span>"
+            else:
+                if note:
+                    tag = _tier_badge("Medium"); info = _info_icon(str(note)); detail = f"<span>{note}</span>"
+                else:
+                    tag = _tier_badge("High"); info = _info_icon("Typical for training distribution"); detail = "<span style='color:#6b7280'>Typical</span>"
+            st.markdown(_h4("Model familiarity") + f"<div>{tag}{info}</div><div style='margin-top:.4rem'>{detail}</div>",
+                        unsafe_allow_html=True)
+
+        # Prediction stability
+        with m3:
+            stab_tag = _tier_badge("High")
+            info = _info_icon("Consistent results across runs; small input changes → small output changes")
+            st.markdown(_h4("Prediction stability") + f"<div>{stab_tag}{info}</div>", unsafe_allow_html=True)
+            st.caption("Details:")
+            st.markdown(f"<div style='margin-top:.2rem'>{sens_table()}</div>", unsafe_allow_html=True)
+
+        model_reason = epi_reason(sum_dict, patient) if dom_type == "Epistemic" else alea_reason(sum_dict, patient)
+        st.markdown(
+            f"<div style='margin-top:.75rem;padding:.6rem .8rem;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa'>"
+            f"<div style='display:flex;align-items:center;gap:.5rem;font-weight:700'>"
+            f"Uncertainty type — {dom_type} {_badge(unc_intensity, _tone(unc_intensity))}"
+            f"</div>"
+            f"<div style='margin-top:.35rem;color:#374151'><b>Drivers:</b> {model_reason}</div>"
+            f"</div>",
+            unsafe_allow_html=True
         )
