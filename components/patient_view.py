@@ -10,7 +10,7 @@ def toy_risk_model(inputs: dict) -> float:
     score += 0.15 if inputs["sex"] == 1 else 0.0
     score += 0.25 if inputs["ecg_abnormal"] else 0.0
     if inputs.get("troponin") is not None:
-        score += 0.35 * min(1.0, max(0.0), (inputs["troponin"] / 0.04))
+        score += 0.35 * min(1.0, max(0.0, (inputs["troponin"] / 0.04)))
     pf = inputs.get("pain_features", [])
     score += 0.1 if "radiating" in pf else 0.0
     score += 0.08 if "crushing" in pf else 0.0

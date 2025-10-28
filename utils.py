@@ -13,9 +13,9 @@ NAV_PAGES = [
     ("pages/2_Patient_Chart.py",         "heart-pulse",   "Patient Chart"),
     ("pages/3_Registration.py",          "receipt",       "Registration"),
     ("pages/4_Visits_and_Complaints.py", "folder2",       "Visits & Complaints"),
-    ("pages/5_Patient_Acuity.py",        "sliders",       "Patient Acuity"),
-    ("pages/6_ED_Disposition.py",        "check2-circle", "ED Disposition"),
-    ("pages/7_ED_Triage_Notes.py",       "journal-text",  "ED Triage Notes"),
+    ("pages/5_Clinical_Decision_Log.py", "clipboard-check",       "Clinical Decision Log"),
+    ("pages/6_Audit_Log.py",             "clock-history", "Audit Log"),
+    ("pages/7_ED_Place_Holder.py",       "journal-text",  "ED Place Holder"),
 ]
 
 # 2) 路由查找用的「字典」 label -> path
@@ -25,9 +25,9 @@ PAGE_ROUTES = {
     "Patient Chart": "pages/2_Patient_Chart.py",
     "Registration": "pages/3_Registration.py",
     "Visits & Complaints": "pages/4_Visits_and_Complaints.py",
-    "Patient Acuity": "pages/5_Patient_Acuity.py",
-    "ED Disposition": "pages/6_ED_Disposition.py",
-    "ED Triage Notes": "pages/7_ED_Triage_Notes.py",
+    "Clinical Decision Log": "pages/5_Clinical_Decision_Log.py",
+    "Audit Log": "pages/6_Audit_Log.py",
+    "ED Place holder": "pages/7_ED_Place_Holder.py",
 }
 
 # --------- 状态 & 通用组件 --------- #
