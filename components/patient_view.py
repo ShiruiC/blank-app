@@ -1,16 +1,15 @@
 # components/patient_view.py
 import math
-import streamlit as st
-from typing import Dict
+from html import escape
+import uuid
 
-# ───────────────────────── Uncertainty-aware toy model ─────────────────────────
 def toy_risk_model(inputs: dict) -> float:
     score = 0.0
     score += 0.015 * (inputs["age"] - 40)
     score += 0.15 if inputs["sex"] == 1 else 0.0
     score += 0.25 if inputs["ecg_abnormal"] else 0.0
     if inputs.get("troponin") is not None:
-        score += 0.35 * min(1.0, max(0.0, (inputs["troponin"] / 0.04)))
+        score += 0.35 * min(1.0, max(0.0, float(inputs["troponin"]) / 0.04))
     pf = inputs.get("pain_features", [])
     score += 0.1 if "radiating" in pf else 0.0
     score += 0.08 if "crushing" in pf else 0.0
@@ -29,16 +28,10 @@ def widen_interval(base_risk: float, data_quality: dict):
     width = float(min(0.35, max(0.05, width)))
     lo = max(0.0, base_risk - width/2)
     hi = min(1.0, base_risk + width/2)
-    if (hi - lo) <= 0.10:
-        conf = ("High", "🟢")
-    elif (hi - lo) <= 0.20:
-        conf = ("Medium", "🟡")
-    else:
-        conf = ("Low", "🟠")
+    if (hi - lo) <= 0.10: conf = ("High", "🟢")
+    elif (hi - lo) <= 0.20: conf = ("Medium", "🟡")
+    else: conf = ("Low", "🟠")
     return lo, hi, conf
-
-def pct(p: float) -> str:
-    return f"{round(100*p)}%"
 
 def band_from_risk(r: float) -> str:
     if r < 0.10: return "Low"
@@ -49,10 +42,8 @@ def band_from_risk(r: float) -> str:
 def drivers_from_inputs(p: dict):
     ri = p["risk_inputs"]; d = []
     d += ["Abnormal ECG"] if ri.get("ecg_abnormal") else []
-    if ri.get("troponin") is None:
-        d += ["Troponin pending"]
-    elif ri["troponin"] >= 0.01:
-        d += [f"Troponin {ri['troponin']:.3f} ng/mL"]
+    if ri.get("troponin") is None: d += ["Troponin pending"]
+    elif ri["troponin"] >= 0.01: d += [f"Troponin {ri['troponin']:.3f} ng/mL"]
     if "radiating" in ri.get("pain_features", []): d += ["Radiating pain"]
     if "crushing" in ri.get("pain_features", []): d += ["Crushing pressure"]
     if "diaphoresis" in ri.get("pain_features", []): d += ["Diaphoresis"]
@@ -150,17 +141,16 @@ def compute_summary(p: dict):
         "suspected_condition": "ACS-like"
     }
 
-# ====== Triage + Disposition rules (simple, tunable) ======
 def triage_level_from_summary(s: dict):
     if s["critical"] or s["base"] >= 0.50:
-        return {"code": "T1", "label": "Immediate", "desc": "High risk for intensive care, emergency procedure, or mortality."}
+        return {"code": "T1", "label": "Immediate", "desc": "Highest probability for intensive care, emergency procedure, or mortality."}
     if s["base"] >= 0.35:
-        return {"code": "T2", "label": "Emergent", "desc": "Elevated risk for intensive care, emergency procedure, or mortality."}
+        return {"code": "T2", "label": "Very Urgent", "desc": "Elevated probability for intensive care, emergency procedure, or mortality."}
     if s["base"] >= 0.20:
-        return {"code": "T3", "label": "Urgent", "desc": "Moderate risk of hospital admission; very low risk of intensive care."}
+        return {"code": "T3", "label": "Urgent", "desc": "Moderate probability of hospital admission or very low probability of intensive care, emergency procedure, or mortality."}
     if s["base"] >= 0.10:
-        return {"code": "T4", "label": "Less urgent", "desc": "Low risk of hospital admission."}
-    return {"code": "T5", "label": "Non-urgent", "desc": "Fast-track; very low risk of admission."}
+        return {"code": "T4", "label": "Less Urgent", "desc": "Low probability of hospital admission."}
+    return {"code": "T5", "label": "Non-Urgent", "desc": "Fast turnaround and low probability of hospital admission."}
 
 def disposition_from_summary(s: dict):
     if s["critical"] or s["base"] >= 0.40: return "Confirm/Admit"
@@ -168,7 +158,14 @@ def disposition_from_summary(s: dict):
     if s["base"] >= 0.10: return "Consult"
     return "Defer/Discharge"
 
-# ====== Confidence score, aleatoric/epistemic split, tiers ======
+# Drawer HTML — no anchors/links; page provides the fixed Streamlit close button
+def _badge(text, tone="info"):
+    colors = {"success":("#065f46","#d1fae5"), "warn":("#92400e","#fef3c7"),
+              "danger":("#7f1d1d","#fee2e2"), "info":("#1e40af","#dbeafe"),
+              "neutral":("#374151","#e5e7eb")}
+    fg,bg = colors.get(tone, colors["neutral"])
+    return f"<span style='display:inline-block;padding:2px 8px;border-radius:999px;font-weight:700;color:{fg};background:{bg};font-size:12px'>{text}</span>"
+
 def decompose_uncertainty(summary: dict, patient: dict):
     width = summary["width"]
     conf_score = max(0.0, min(1.0, 1.0 - (width / 0.35)))
@@ -181,289 +178,168 @@ def decompose_uncertainty(summary: dict, patient: dict):
     total = alea_raw + epi
     alea = alea_raw / total if total > 0 else 0.5
     epis = epi / total if total > 0 else 0.5
-    if conf_score < 0.40: tier = "Low"
-    elif conf_score < 0.70: tier = "Medium"
-    else: tier = "High"
+    tier = "High" if conf_score >= 0.70 else ("Medium" if conf_score >= 0.40 else "Low")
     return alea*100, epis*100, conf_score, tier
 
-def pct_tier(score: float, tier: str):
-    return f"{round(score*100)}% <span style='color:#6b7280'>(<b>{tier}</b>)</span>"
+def uncertainty_drawer_html(scope: str, *, sum_dict: dict, patient: dict,
+                            triage_label: str = "", dispo_label: str = "", opened: bool = True) -> str:
+    from html import escape as esc
+    import uuid
+    uid = "ua_" + uuid.uuid4().hex
 
-# ====== Extras used in the new layout ======
-def sens_table():
-    rows = [
-        ("HR",  "+5%", "+2%",  "-1%"),
-        ("SBP", "+5%", "+0%",  "+1%"),
-        ("SpO₂", "±5%", "+3%", "—"),
-    ]
-    html = [
-        "<table style='width:100%;border-collapse:collapse;font-size:12px'>",
-        "<thead><tr>",
-        "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Vital</th>",
-        "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Change</th>",
-        "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Output ↑</th>",
-        "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Output ↓</th>",
-        "</tr></thead><tbody>",
-    ]
-    for v, delta, up, dn in rows:
-        html.append(
-            f"<tr><td style='padding:4px 0'>{v}</td>"
-            f"<td style='padding:4px 0'>{delta}</td>"
-            f"<td style='padding:4px 0'>{up}</td>"
-            f"<td style='padding:4px 0'>{dn}</td></tr>"
-        )
-    html.append("</tbody></table>")
-    return "".join(html)
-
-def pattern_similarity(patient: dict) -> float:
-    sim = 0.3
-    if patient["risk_inputs"].get("ecg_abnormal"): sim += 0.3
-    t = patient["risk_inputs"].get("troponin")
-    if t is not None:
-        sim += min(0.4, t / 0.04 * 0.4)
-    return float(min(0.98, max(0.02, sim)))
-
-def alea_reason(summary: dict, patient: dict) -> str:
-    w = summary["width"]
-    hints = []
-    if patient["data_quality"].get("time_from_onset_min", 999) < 90:
-        hints.append("early presentation (<90 min)")
-    if "troponin" in patient["data_quality"].get("missing", []):
-        hints.append("troponin pending")
-    if not hints: hints.append("physiologic variability in symptoms")
-    tier = "low" if w <= 0.10 else ("medium" if w <= 0.20 else "high")
-    return f"interval width suggests {tier} aleatoric uncertainty; drivers: {', '.join(hints)}."
-
-def epi_reason(summary: dict, patient: dict) -> str:
-    ood = patient["data_quality"].get("ood", False)
-    miss = patient["data_quality"].get("missing", [])
-    parts = []
-    parts.append("no OOD signals" if not ood else "slight distribution shift vs. training")
-    parts.append("no missing key data" if not miss else f"missing: {', '.join(miss)}")
-    return "Model familiarity & limits: " + "; ".join(parts)
-
-# ── Role-specific panels (concise; no duplicate metrics) ──
-def render_patient_panel(summary: dict):
-    st.markdown("**What this means for you**")
-    nf_mid, nf_lo, nf_hi = round(summary["base"]*100), round(summary["lo"]*100), round(summary["hi"]*100)
-    st.markdown(
-        f"- Out of **100** people like you, about **{nf_mid}** might have a serious heart problem.\n"
-        f"- A reasonable range for now is **{nf_lo}–{nf_hi} out of 100** until we get more results.\n"
-        "- We’ll follow the steps above (blood test, repeat ECG, monitoring)."
-    )
-    st.markdown("**What is affecting your risk:** " + ", ".join(summary["drivers"]))
-
-def render_clinician_panel(summary: dict):
-    return
-
-# ───────────────────── Confidence & Uncertainty renderer ──────────────────────
-def render_confidence_uncertainty(*, sum_dict: dict, patient: dict):
-    def _pct_int(x) -> int:
-        try: return int(round(100*float(x)))
-        except: return 0
+    # ---- existing computation (kept) ----
+    alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(sum_dict, patient)
+    conf_pct = int(round(conf_score*100))
+    intensity = "Low" if conf_score >= 0.70 else ("Moderate" if conf_score >= 0.35 else "High")
+    dom_type = "Aleatoric" if alea_pct >= epis_pct else "Epistemic"
+    tone_map = {"High":"danger","Moderate":"warn","Low":"success"}
 
     def _badge(text, tone="info"):
-        colors = {
-            "success": ("#065f46", "#d1fae5"),
-            "warn":    ("#92400e", "#fef3c7"),
-            "danger":  ("#7f1d1d", "#fee2e2"),
-            "info":    ("#1e40af", "#dbeafe"),
-            "neutral": ("#374151", "#e5e7eb"),
-        }
-        fg, bg = colors.get(tone, colors["neutral"])
-        return f"<span style='display:inline-block;padding:2px 8px;border-radius:999px;font-weight:600;color:{fg};background:{bg};font-size:12px'>{text}</span>"
+        colors = {"success":("#065f46","#d1fae5"), "warn":("#92400e","#fef3c7"),
+                  "danger":("#7f1d1d","#fee2e2"), "info":("#1e40af","#dbeafe"),
+                  "neutral":("#374151","#e5e7eb")}
+        fg,bg = colors.get(tone, colors["neutral"])
+        return f"<span style='display:inline-block;padding:2px 8px;border-radius:999px;font-weight:700;color:{fg};background:{bg};font-size:12px'>{esc(text)}</span>"
 
-    def _tier_badge(tier: str):
-        t = (tier or "").lower()
-        if t == "high":   return _badge("High", "success")
-        if t == "medium": return _badge("Medium", "warn")
-        return _badge("Low", "danger")
+    def h4(t): return f"<div style='font-weight:800;font-size:15px;margin:10px 0 6px'>{esc(t)}</div>"
 
-    def _info_icon(tip: str):
-        safe = (tip or "").replace("'", "&#39;")
-        return f"<span title='{safe}' style='color:#6b7280;margin-left:6px'>ℹ️</span>"
+    title = {
+        "triage": f"Why Triage: {esc(triage_label or '—')}",
+        "disposition": f"Why Disposition: {esc(dispo_label or '—')}",
+        "steps": "Why These Next Steps",
+    }.get(scope, "Why?")
 
-    def _h4(txt): 
-        return f"<div style='font-weight:700;font-size:15px;margin-bottom:.4rem'>{txt}</div>"
+    # bars + sections (same as your version; trimmed for brevity)
+    bars = (
+        "<div style='display:flex;gap:.5rem;align-items:center;margin-top:.2rem'>"
+        "<div style='min-width:92px'>Aleatoric</div>"
+        "<div style='height:10px;background:#e5e7eb;border-radius:999px;flex:1;position:relative'>"
+        f"<div style='height:10px;border-radius:999px;background:#60A5FA;width:{int(alea_pct)}%'></div>"
+        f"</div><div style='min-width:42px;text-align:right'>{int(alea_pct)}</div></div>"
+        "<div style='color:#6b7280;margin:4px 0 10px 92px'>patient variability</div>"
+        "<div style='display:flex;gap:.5rem;align-items:center'>"
+        "<div style='min-width:92px'>Epistemic</div>"
+        "<div style='height:10px;background:#e5e7eb;border-radius:999px;flex:1;position:relative'>"
+        f"<div style='height:10px;border-radius:999px;background:#A78BFA;width:{int(epis_pct)}%'></div>"
+        f"</div><div style='min-width:42px;text-align:right'>{int(epis_pct)}</div></div>"
+        "<div style='color:#6b7280;margin:4px 0 2px 92px'>model limitation</div>"
+    )
 
-    def _uncertainty_intensity(conf_score: float) -> str:
-        try: cs = float(conf_score)
-        except: cs = 0.5
-        if cs < 0.35:  return "High"
-        if cs < 0.70:  return "Moderate"
-        return "Low"
-
-    def _tone(level: str):
-        return {"High":"danger","Moderate":"warn","Low":"success"}.get(level, "neutral")
-
-    def _risk_band_badge(base_pct: int):
-        band = band_from_risk(base_pct/100.0)
-        tone = "success" if band in ["Low","Low-Moderate"] else ("warn" if band=="Moderate" else "danger")
-        return _badge(band, tone)
-
-    with st.expander("Confidence & Uncertainty", expanded=False):
-
-        alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(sum_dict, patient)
-        conf_pct = _pct_int(conf_score)
-        unc_intensity = _uncertainty_intensity(conf_score)
-        dom_type = "Aleatoric" if alea_pct >= epis_pct else "Epistemic"
-
-        c1, c2 = st.columns([0.40, 0.60])
-        with c1:
-            st.markdown(
-                _h4("Confidence score") +
-                f"<div style='display:flex;align-items:baseline;gap:.5rem'>"
-                f"<div style='font-size:24px;font-weight:800'>{conf_pct}%</div>"
-                f"{_tier_badge(conf_tier)}</div>",
-                unsafe_allow_html=True
-            )
-        with c2:
-            bars = f"""
-            <div style="display:flex;gap:.5rem;align-items:center;margin-top:.2rem">
-              <div style="min-width:92px">Aleatoric</div>
-              <div style="height:10px;background:#e5e7eb;border-radius:999px;flex:1;position:relative;">
-                <div style="height:10px;border-radius:999px;background:#60A5FA;width:{int(alea_pct)}%"></div>
-              </div><div style="min-width:42px;text-align:right">{int(alea_pct)}%</div>
-            </div>
-            <div style="color:#6b7280;margin:4px 0 10px 92px">patient variability</div>
-            <div style="display:flex;gap:.5rem;align-items:center;">
-              <div style="min-width:92px">Epistemic</div>
-              <div style="height:10px;background:#e5e7eb;border-radius:999px;flex:1;position:relative;">
-                <div style="height:10px;border-radius:999px;background:#A78BFA;width:{int(epis_pct)}%"></div>
-              </div><div style="min-width:42px;text-align:right">{int(epis_pct)}%</div>
-            </div>
-            <div style="color:#6b7280;margin:4px 0 2px 92px">model limitation</div>
-            """
-            st.markdown(_h4("Uncertainty composition") + bars, unsafe_allow_html=True)
-
-        st.divider()
-
-        st.markdown("### Clinical reasoning layer — why this patient’s risk is high/low")
-        a1, a2 = st.columns(2)
-
-        with a1:
-            lo, hi = _pct_int(sum_dict.get("lo", 0)), _pct_int(sum_dict.get("hi", 0))
-            base = _pct_int(sum_dict.get("base", 0))
-            drivers = sum_dict.get("drivers", []) or []
-            chips = " ".join(_badge(str(d), "neutral") for d in drivers) if drivers else "<span style='color:#6b7280'>—</span>"
-            st.markdown(
-                _h4("Risk") +
-                f"<div style='display:flex;align-items:center;gap:.5rem'>"
-                f"<div style='font-size:22px;font-weight:800'>{base}%</div>{_risk_band_badge(base)}</div>"
-                f"<div style='color:#6b7280;margin-top:2px'>Point risk</div>"
-                f"<div style='margin-top:.5rem'><b>Interval:</b> {lo}% – {hi}% <span style='color:#6b7280'>(uncertainty range)</span></div>"
-                f"<div style='margin-top:.5rem'><b>Contributing factors:</b> {chips}</div>",
-                unsafe_allow_html=True
-            )
-
-        with a2:
-            pr_sim = pattern_similarity(patient) or 0.0
-            suspected = sum_dict.get("suspected_condition", "ACS-like")
-            st.markdown(
-                _h4("Detected diagnosis / pattern recognition") +
-                f"<div><b>Similarity:</b> <span style='font-weight:800'>{_pct_int(pr_sim)}%</span>"
-                f" to <span style='font-weight:600'>{suspected}</span> cluster.</div>",
-                unsafe_allow_html=True
-            )
-
-        clinical_reason = alea_reason(sum_dict, patient) if dom_type == "Aleatoric" else epi_reason(sum_dict, patient)
-        st.markdown(
-            f"<div style='margin-top:.75rem;padding:.6rem .8rem;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa'>"
-            f"<div style='display:flex;align-items:center;gap:.5rem;font-weight:700'>"
-            f"Uncertainty type — {dom_type} "
-            f"{_badge(unc_intensity, _tone(unc_intensity))}</div>"
-            f"<div style='margin-top:.35rem;color:#374151'><b>Drivers:</b> {clinical_reason}</div>"
-            f"</div>",
-            unsafe_allow_html=True
+    if scope == "triage":
+        base = int(round(100*sum_dict.get("base",0)))
+        lo, hi = int(round(100*sum_dict.get("lo",0))), int(round(100*sum_dict.get("hi",0)))
+        drivers = sum_dict.get("drivers", []) or []
+        chips = "".join(f"<span style='display:inline-block;border-radius:8px;background:#eef2ff;color:#1e3a8a;padding:2px 8px;margin:2px 4px 0 0;font-weight:600;font-size:12px'>{esc(d)}</span>" for d in drivers) or "—"
+        pr = int(round(100 * (0.3 + (0.3 if patient['risk_inputs'].get('ecg_abnormal') else 0) +
+                              (min(0.4, (patient['risk_inputs'].get('troponin') or 0)/0.04 * 0.4)))))
+        section = (
+            h4("Risk & interval") + f"<div><b>Point risk:</b> {base}% • <b>Range:</b> {lo}%–{hi}%</div>" +
+            h4("Pattern recognition") + f"<div>Similarity: <b>{pr}%</b> to {esc(sum_dict.get('suspected_condition','ACS-like'))} cluster.</div>" +
+            h4("Contributing factors") + f"<div>{chips}</div>"
+        )
+    elif scope == "disposition":
+        dq = patient.get("data_quality",{}) or {}
+        missing = dq.get("missing", [])
+        miss = (" ".join(
+            f"<span style='border:1px solid #e5e7eb;border-radius:6px;padding:2px 6px;margin-right:4px'>{esc(m)}</span>"
+            for m in missing)) if missing else "<span style='color:#6b7280'>No missing key data</span>"
+        wid_pct = int(round(100*sum_dict.get("width",0.0)))
+        fam = "Outside typical training range" if dq.get("ood") else "Typical for training distribution"
+        section = (
+            h4("Data completeness") + f"<div>{miss}</div>" +
+            h4("Model familiarity") + f"<div>{esc(fam)}</div>" +
+            h4("How certainty affects disposition") +
+            f"<div>Risk interval width ≈ <b>{wid_pct}%</b>. Narrower ranges → clearer split between Admit vs Observe.</div>"
+        )
+    else:
+        section = (
+            h4("Prediction stability (local sensitivity)") +
+            "<table style='width:100%;border-collapse:collapse;font-size:12px'>"
+            "<thead><tr><th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Vital</th>"
+            "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Change</th>"
+            "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Output ↑</th>"
+            "<th style='text-align:left;border-bottom:1px solid #e5e7eb;padding:4px 0'>Output ↓</th></tr></thead>"
+            "<tbody><tr><td>HR</td><td>+5%</td><td>+2%</td><td>-1%</td></tr>"
+            "<tr><td>SBP</td><td>+5%</td><td>+0%</td><td>+1%</td></tr>"
+            "<tr><td>SpO₂</td><td>±5%</td><td>+3%</td><td>—</td></tr></tbody></table>"
         )
 
-        st.divider()
+    callout = (
+        "<div style='margin-top:.75rem;padding:.6rem .8rem;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa'>"
+        f"<div style='font-weight:800'>Uncertainty type — {dom_type} "
+        f"{_badge(intensity, tone='success' if intensity=='Low' else ('warn' if intensity=='Moderate' else 'danger'))}</div>"
+        "<div style='margin-top:.35rem;color:#374151'><b>Drivers:</b> " +
+        esc('interval width suggests ' + ('low' if sum_dict['width']<=0.10 else ('medium' if sum_dict['width']<=0.20 else 'high')) +
+            ' aleatoric uncertainty' if dom_type=='Aleatoric' else 'model familiarity & limits') +
+        "</div></div>"
+    )
 
-        st.markdown("### Model reasoning layer — how much the model trusts itself")
-        m1, m2, m3 = st.columns(3)
+    start_hidden = " hidden" if not opened else ""
+    return f"""
+<style>
+/* iframe-local, so we need full height via component height in Python */
+#{uid} .ua-shell{{position:fixed;top:0;right:0;height:100vh;z-index:2147483602;pointer-events:none}}
+#{uid} .ua-drawer{{position:absolute;top:0;right:0;height:100%;width:420px;max-width:92vw;background:#fff;
+  border-left:1px solid #e5e7eb;box-shadow:-8px 0 24px rgba(0,0,0,.08);
+  transform:translateX(0);transition:transform .22s ease;pointer-events:auto;display:flex;flex-direction:column}}
+#{uid} .ua-handle{{position:absolute;top:50%;right:420px;transform:translateY(-50%);width:28px;height:64px;
+  border:1px solid #d1d5db;background:#fff;border-radius:8px 0 0 8px;display:flex;align-items:center;justify-content:center;
+  font-weight:900;cursor:pointer;pointer-events:auto;box-shadow:-2px 2px 8px rgba(0,0,0,.06)}}
+#{uid}.hidden .ua-drawer{{transform:translateX(100%)}}
+#{uid}.hidden .ua-handle{{right:0}} /* when hidden, the grip sits at the page edge */
 
-        with m1:
-            missing = (patient.get("data_quality", {}) or {}).get("missing", []) or []
-            if not missing:
-                tag = _tier_badge("High"); detail = "<span style='color:#6b7280'>No missing data</span>"
-            else:
-                tag = _tier_badge("Medium" if len(missing) <= 2 else "Low")
-                chips = " ".join(_badge(m, "neutral") for m in missing)
-                detail = f"Missing: {chips}"
-            st.markdown(_h4("Data completeness") + f"<div>{tag}</div><div style='margin-top:.4rem'>{detail}</div>",
-                        unsafe_allow_html=True)
+#{uid} .ua-head{{position:sticky;top:0;background:#fff;z-index:2;padding:12px 16px 10px 16px;border-bottom:1px solid #e5e7eb}}
+#{uid} .ua-title{{font-weight:800;font-size:18px;margin:0}}
+#{uid} .ua-x{{position:absolute;top:10px;right:10px;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:8px;
+  border:1px solid #d1d5db;font-weight:800;color:#111827;background:#fff;cursor:pointer}}
+#{uid} .ua-x:hover{{background:#f3f4f6}}
+#{uid} .ua-body{{flex:1 1 auto;overflow:auto;-webkit-overflow-scrolling:touch;padding:16px 18px 24px 18px}}
+#{uid} .ua-body pre{{display:none!important}}
+</style>
 
-        with m2:
-            dq = patient.get("data_quality", {}) or {}
-            ood = dq.get("ood", False)
-            if ood:
-                tag = _tier_badge("Low"); detail = "<span style='color:#6b7280'>Outside typical training range</span>"
-            else:
-                tag = _tier_badge("High"); detail = "<span style='color:#6b7280'>Typical</span>"
-            st.markdown(_h4("Model familiarity") + f"<div>{tag}</div><div style='margin-top:.4rem'>{detail}</div>",
-                        unsafe_allow_html=True)
+<div id="{uid}" class="{('' if opened else 'hidden')}">
+  <div class="ua-shell">
+    <div class="ua-handle" title="Toggle details">{"≪" if opened else "≫"}</div>
+    <div class="ua-drawer" role="dialog" aria-label="Confidence & Uncertainty">
+      <div class="ua-head">
+        <div class="ua-title">{title}</div>
+        <button class="ua-x" title="Close">✕</button>
+      </div>
+      <div class="ua-body">
+        {h4("Confidence score")}
+        <div style="display:flex;align-items:baseline;gap:.5rem">
+          <div style="font-size:24px;font-weight:900">{conf_pct}%</div>
+          {_badge(conf_tier, 'success' if conf_tier=='High' else ('warn' if conf_tier=='Medium' else 'danger'))}
+        </div>
+        {h4("Uncertainty composition")}
+        {bars}
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:12px 0"/>
+        {section}
+        <hr style="border:none;border-top:1px solid #e5e7eb;margin:12px 0"/>
+        {callout}
+      </div>
+    </div>
+  </div>
+</div>
 
-        with m3:
-            stab_tag = _tier_badge("High")
-            st.markdown(_h4("Prediction stability") + f"<div>{stab_tag}</div>", unsafe_allow_html=True)
-            st.caption("Details:")
-            st.markdown(f"<div style='margin-top:.2rem'>{sens_table()}</div>", unsafe_allow_html=True)
-
-        model_reason = epi_reason(sum_dict, patient) if dom_type == "Epistemic" else alea_reason(sum_dict, patient)
-        st.markdown(
-            f"<div style='margin-top:.75rem;padding:.6rem .8rem;border:1px solid #e5e7eb;border-radius:10px;background:#fafafa'>"
-            f"<div style='display:flex;align-items:center;gap:.5rem;font-weight:700'>"
-            f"Uncertainty type — {dom_type} "
-            f"{_badge(unc_intensity, _tone(unc_intensity))}</div>"
-            f"<div style='margin-top:.35rem;color:#374151'><b>Drivers:</b> {model_reason}</div>"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-
-# ─────────────────────────── Tabs (NEW) ───────────────────────────
-def status_tabs(state: Dict) -> None:
-    """
-    Render overview tabs below the header: Current | History | Results.
-    Read-only; values are pulled from `state`.
-    """
-    tab1, tab2, tab3 = st.tabs(["Current", "History", "Results"])
-
-    with tab1:
-        st.subheader("Current Vitals")
-        c1, c2, c3, c4 = st.columns(4)
-        hr   = state.get("HR", "—")
-        sbp  = state.get("SBP", "—")
-        spo2 = state.get("SpO₂", state.get("SpO2", "—"))
-        tmp  = state.get("TempC", "—")
-
-        c1.metric("HR",   f"{hr} bpm"   if hr  != "—" else "—")
-        c2.metric("SBP",  f"{sbp} mmHg" if sbp != "—" else "—")
-        c3.metric("SpO₂", f"{spo2} %"   if spo2!= "—" else "—")
-        c4.metric("Temp", f"{tmp} °C"   if tmp != "—" else "—")
-
-        last = state.get("VitalsUpdated") or state.get("Arrival") or "—"
-        st.caption(f"Updated {last} • Stability/variance → aleatoric uncertainty")
-
-    with tab2:
-        st.subheader("Vital Trends")
-        st.info("Trend plots for HR / SBP / SpO₂ / Temp can be shown here. "
-                "Higher variance ⇒ ↑ aleatoric uncertainty; monitoring gaps ⇒ ↑ epistemic uncertainty.")
-
-    with tab3:
-        st.subheader("Results")
-        ecg = state.get("ECG", "—")
-        tro = state.get("hs-cTn (ng/L)", state.get("hs_cTn", "—"))
-        tro_time = state.get("TroponinTime", "—")
-
-        r1, r2 = st.columns(2)
-        with r1:
-            st.text_input("ECG (summary)", value=str(ecg), disabled=True)
-        with r2:
-            st.text_input("hs-cTn (ng/L)", value="" if tro in [None, "None"] else str(tro), disabled=True)
-            st.caption(f"Result time: {tro_time}")
-
-        missing = state.get("MissingKeyResults", [])
-        if missing:
-            st.warning("Missing for pathway: " + ", ".join(missing) + "  → ↑ epistemic uncertainty")
-        else:
-            st.success("Key results complete  → ↓ epistemic uncertainty")
+<script>
+(function(){{
+  const root = document.getElementById("{uid}");
+  const handle = root.querySelector(".ua-handle");
+  const closeBtn = root.querySelector(".ua-x");
+  const setOpen = (open)=>{{
+    if(open) {{
+      root.classList.remove("hidden");
+      handle.textContent = "≪";
+    }} else {{
+      root.classList.add("hidden");
+      handle.textContent = "≫";
+    }}
+  }};
+  handle?.addEventListener("click", ()=>{{
+    setOpen(root.classList.contains("hidden"));
+  }});
+  closeBtn?.addEventListener("click", ()=> setOpen(false));
+}})();
+</script>
+"""
