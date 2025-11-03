@@ -3,91 +3,87 @@ import streamlit as st
 from html import escape
 
 # ── Uncertainty side-panel (pure Streamlit, no iframe)
-def _render_uncertainty_panel():
-    opened = bool(st.session_state.get("why_open", False))
-    scope = st.session_state.get("why_scope", "triage")
+def _render_uncertainty_panel(scope_here: str):
+    """
+    Scope-aware panel. Opens ONLY from the ❓ button for this scope.
+    The right-edge handle (≪) is shown only when OPEN and only closes the panel.
+    """
+    is_open   = bool(st.session_state.get("why_open"))
+    scope_now = st.session_state.get("why_scope")
 
-    # Harmonize fonts with the main page
+    open_here = bool(is_open and scope_now == scope_here)
+
+    # Shared CSS
     st.markdown("""
     <style>
       .ua-panel * { font-family: inherit !important; }
       .ua-panel h3, .ua-panel .stHeading, .ua-panel .stSubheader { font-weight: 800; }
       .ua-panel .stMetric label { font-weight: 600; }
       .ua-panel .stProgress > div > div { transition: width .25s ease; }
-      .ua-panel .ua-handle { font-size: 18px; font-weight: 900; }
+      .ua-handle { font-size: 18px; font-weight: 900; }
     </style>
     """, unsafe_allow_html=True)
 
-    # Handle button (always visible in the slim right column)
-    handle_label = "≪" if opened else "≫"
-    if opened:
-        if st.button(handle_label, key="ua_collapse", help="Hide details", type="secondary"):
+    # If this scope is not open, render nothing on the right (no opener/handle).
+    if not open_here:
+        return
+
+    # Close-only handle (no open action here)
+    c_top = st.columns([0.92, 0.08])
+    with c_top[1]:
+        if st.button("≪", key=f"ua_collapse_{scope_here}", help="Hide details", type="secondary"):
             _close_drawer()
             st.stop()
-    else:
-        if st.button(handle_label, key="ua_expand", help="Show uncertainty details", type="secondary"):
-            _open_drawer(st.session_state.get("why_scope","triage"),
-                         st.session_state.get("why_triage_label",""),
-                         st.session_state.get("why_dispo_label",""))
-            st.stop()
 
-    if not opened:
-        return  # nothing else in the slim state
-
-    # Panel content
+    # Full panel content
     with st.container(border=True):
         st.markdown('<div class="ua-panel">', unsafe_allow_html=True)
 
         summary  = st.session_state.get("_ua_summary")
         patient  = st.session_state.get("_ua_patient")
-        tri_lbl  = st.session_state.get("why_triage_label","")
-        disp_lbl = st.session_state.get("why_dispo_label","")
         if not summary or not patient:
             st.info("No uncertainty data available.")
             st.markdown('</div>', unsafe_allow_html=True)
             return
 
-        from components.patient_view import decompose_uncertainty  # local import to avoid circulars
+        # Lazy import to avoid circulars if any
+        from components.patient_view import decompose_uncertainty
+
         alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(summary, patient)
         conf_pct = int(round(conf_score*100))
 
         st.subheader("Confidence & Uncertainty")
         st.metric("Confidence score", f"{conf_pct}%", conf_tier)
-
         st.caption("Uncertainty composition")
         st.progress(min(100, int(alea_pct)), text="Aleatoric")
         st.progress(min(100, int(epis_pct)), text="Epistemic")
-
         st.divider()
 
-        # Scope-specific details
-        if scope == "triage":
+        tri_lbl  = st.session_state.get("why_triage_label","")
+        disp_lbl = st.session_state.get("why_dispo_label","")
+
+        if scope_here == "triage":
             base = int(round(100*summary.get("base",0)))
             lo, hi = int(round(100*summary.get("lo",0))), int(round(100*summary.get("hi",0)))
             st.subheader(f"Why Triage: {tri_lbl}")
             st.write(f"**Risk & interval**: point {base}% • range {lo}%–{hi}%")
+            for d in (summary.get("drivers") or []):
+                st.write(f"• {d}")
 
-            drivers = summary.get("drivers", []) or []
-            if drivers:
-                st.caption("Contributing factors")
-                for d in drivers: st.write(f"• {d}")
-
-        elif scope == "disposition":
+        elif scope_here == "disposition":
             st.subheader(f"Why Disposition: {disp_lbl}")
             dq = patient.get("data_quality",{}) or {}
             missing = dq.get("missing", [])
             wid_pct = int(round(100*summary.get("width",0.0)))
-
             st.write("**Data completeness**")
             if missing:
                 for m in missing: st.write(f"• Missing: {m}")
             else:
                 st.write("• No missing key data")
-
             st.write(f"**Risk interval width** ≈ {wid_pct}% — narrower ranges mean clearer split between Admit vs Observe.")
             st.write("**Model familiarity**: " + ("Outside typical training range" if dq.get("ood") else "Typical for training distribution"))
 
-        else:
+        else:  # steps
             st.subheader("Why These Next Steps")
             st.write("**Prediction stability (local sensitivity)**")
             st.table({
@@ -101,14 +97,16 @@ def _render_uncertainty_panel():
         st.caption("Aleatoric = patient variability • Epistemic = model/data limits")
         st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Drawer helpers (no iframe, no JS)
+# ── Drawer helpers
 def _drawer_cols(opened: bool):
-    """Return (left, right) columns. When closed, right is a slim handle."""
+    """Return (left, right) columns. When closed, right is eliminated so content spans full width."""
     if opened:
         return st.columns([0.68, 0.32], vertical_alignment="top")
     else:
-        # keep a tiny right column for the handle button
-        return st.columns([0.98, 0.02], vertical_alignment="center")
+        # A single full-width column on the left and a minimal placeholder on the right
+        left = st.container()
+        right = st.container()  # unused placeholder so caller can still 'with right:'
+        return left, right
 
 def _open_drawer(scope: str, triage_label: str = "", dispo_label: str = ""):
     st.session_state["why_open"] = True
@@ -312,31 +310,31 @@ def render_patient_chart():
     t_color = color_map[t_code]
     disp_default = disposition_from_summary(summary)
 
-    # ============ LAYOUT WITH RIGHT DRAWER ============
-    left_col, right_col = _drawer_cols(bool(st.session_state.get("why_open", False)))
+    # ============ AI SECTION ============
+    st.markdown("### AI Recommendations")
 
-    # LEFT COLUMN CONTENT
+    # ----- TRIAGE (now a 2-column wrapper so the panel starts at the very top) -----
+    tri_open = bool(st.session_state.get("why_open") and st.session_state.get("why_scope")=="triage")
+    left_col, right_col = _drawer_cols(tri_open)
     with left_col:
-        st.markdown("### AI Recommendations")
-
-        # TRIAGE — compact row + ❓
         r1, r2 = st.columns([0.86, 0.14])
         with r1:
             st.markdown(
                 f"""
                 <div class="ua-line">
-                  <span class="ua-label">AI Triage Recommendation:</span>
-                  {_pill(t_code, tone=t_color, inverse=True)}
-                  <div><b>{escape(t_label)}</b><br><span class="ua-muted">{escape(t_desc)}</span></div>
+                <span class="ua-label">AI Triage Recommendation:</span>
+                {_pill(t_code, tone=t_color, inverse=True)}
+                <div><b>{escape(t_label)}</b><br><span class="ua-muted">{escape(t_desc)}</span></div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
         with r2:
-            st.button("❓", key="why_triage_btn", help="How confident is the AI triage recommendation?",
+            st.button("❓", key="why_triage_btn",
+                      help="How confident is the AI triage recommendation?",
                       on_click=_open_drawer, args=("triage", f"{t_code} — {t_label}", ""))
 
-        # All triage levels (AI highlighted)
+        # All triage levels
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         for k in ["T1","T2","T3","T4","T5"]:
             lab, desc, colhex = TRIAGE_LEVELS[k]
@@ -358,10 +356,9 @@ def render_patient_chart():
             )
 
         # Clinician TRIAGE
-        left, right = st.columns([0.18, 0.82], vertical_alignment="center")
-        with left:
-            st.markdown("<div class='ua-label'>Clinician Triage</div>", unsafe_allow_html=True)
-        with right:
+        lt, rt = st.columns([0.18, 0.82], vertical_alignment="center")
+        with lt:  st.markdown("<div class='ua-label'>Clinician Triage</div>", unsafe_allow_html=True)
+        with rt:
             tri_opts = ["T1","T2","T3","T4","T5"]
             try:
                 st.segmented_control("tri_final", tri_opts, selection_mode="single",
@@ -370,33 +367,35 @@ def render_patient_chart():
                 st.radio(label="", options=tri_opts, index=tri_opts.index(t_code),
                          horizontal=True, key="tri_final_radio", label_visibility="collapsed")
         st.markdown('<div style="height:0;margin-top:-12px;"><hr class="ua-slim-hr"></div>', unsafe_allow_html=True)
+    with right_col:
+        _render_uncertainty_panel("triage")
 
-        # DISPOSITION — compact row + ❓
-        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    # ----- DISPOSITION -----
+    disp_open = bool(st.session_state.get("why_open") and st.session_state.get("why_scope")=="disposition")
+    left_col, right_col = _drawer_cols(disp_open)
+    with left_col:
         dleft, dright = st.columns([0.86, 0.14])
         with dleft:
             st.markdown(
                 f"""
                 <div class="ua-line">
-                  <span class="ua-label">AI Disposition Recommendation:</span>
-                  <span class="ua-badge">{escape(disp_default)}</span>
-                  <span class="ua-muted">{escape(DISP_LEVELS[disp_default])}</span>
+                <span class="ua-label">AI Disposition Recommendation:</span>
+                <span class="ua-badge">{escape(disp_default)}</span>
+                <span class="ua-muted">{escape(DISP_LEVELS[disp_default])}</span>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
         with dright:
-            st.button("❓", key="why_dispo_btn", help="How confident is the AI disposition recommendation?",
+            st.button("❓", key="why_dispo_btn",
+                      help="How confident is the AI disposition recommendation?",
                       on_click=_open_drawer, args=("disposition","",str(disp_default)))
 
-        # Full dispositions list (AI highlighted)
         render_dispo_list(disp_default)
 
-        # Clinician DISPOSITION
-        left, right = st.columns([0.18, 0.82], vertical_alignment="center")
-        with left:
-            st.markdown("<div class='ua-label'>Clinician Disposition</div>", unsafe_allow_html=True)
-        with right:
+        lcdl, lcdr = st.columns([0.18, 0.82], vertical_alignment="center")
+        with lcdl: st.markdown("<div class='ua-label'>Clinician Disposition</div>", unsafe_allow_html=True)
+        with lcdr:
             disp_opts = list(DISP_LEVELS.keys())
             try:
                 st.segmented_control("disp_final", disp_opts, selection_mode="single",
@@ -405,13 +404,18 @@ def render_patient_chart():
                 st.radio(label="", options=disp_opts, index=disp_opts.index(disp_default),
                          horizontal=True, key="disp_final_radio", label_visibility="collapsed")
         st.markdown('<div style="height:0;margin-top:-20px;"><hr class="ua-slim-hr"></div>', unsafe_allow_html=True)
+    with right_col:
+        _render_uncertainty_panel("disposition")
 
-        # NEXT STEPS — ❓ + checkboxes
+    # ----- NEXT STEPS -----
+    steps_open = bool(st.session_state.get("why_open") and st.session_state.get("why_scope")=="steps")
+    left_col, right_col = _drawer_cols(steps_open)
+    with left_col:
         s1, s2 = st.columns([0.86, 0.14])
-        with s1:
-            st.markdown("**AI Next-Steps Suggestions**")
+        with s1: st.markdown("**AI Next-Steps Suggestions**")
         with s2:
-            st.button("❓", key="why_steps_btn", help="How confident is the AI next-steps suggestion?",
+            st.button("❓", key="why_steps_btn",
+                      help="How confident is the AI next-steps suggestion?",
                       on_click=_open_drawer, args=("steps","",""))
 
         ai_steps = list(summary.get("steps") or [
@@ -422,19 +426,14 @@ def render_patient_chart():
         ])
         for i, step in enumerate(ai_steps):
             c = st.columns([0.06, 0.94])
-            with c[0]:
-                st.checkbox("", key=f"agree_step_{i}")
-            with c[1]:
-                st.markdown(_chip(step), unsafe_allow_html=True)
+            with c[0]: st.checkbox("", key=f"agree_step_{i}")
+            with c[1]: st.markdown(_chip(step), unsafe_allow_html=True)
 
-        # Notes + Save
         st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
         st.text_area("Notes (optional)", placeholder="Rationale, serial lab plan, shared decision…", height=140, key="clin_notes")
         st.button("Save", type="primary", key="save_btn")
-
-    # RIGHT COLUMN CONTENT (IMPORTANT: not nested under left_col)
     with right_col:
-        _render_uncertainty_panel()
+        _render_uncertainty_panel("steps")
 
 if __name__ == "__main__":
     render_patient_chart()
