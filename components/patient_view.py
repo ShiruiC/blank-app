@@ -226,16 +226,182 @@ def uncertainty_drawer_html(scope: str, *, sum_dict: dict, patient: dict,
     )
 
     if scope == "triage":
-        base = int(round(100*sum_dict.get("base",0)))
-        lo, hi = int(round(100*sum_dict.get("lo",0))), int(round(100*sum_dict.get("hi",0)))
-        drivers = sum_dict.get("drivers", []) or []
-        chips = "".join(f"<span style='display:inline-block;border-radius:8px;background:#eef2ff;color:#1e3a8a;padding:2px 8px;margin:2px 4px 0 0;font-weight:600;font-size:12px'>{esc(d)}</span>" for d in drivers) or "—"
-        pr = int(round(100 * (0.3 + (0.3 if patient['risk_inputs'].get('ecg_abnormal') else 0) +
-                              (min(0.4, (patient['risk_inputs'].get('troponin') or 0)/0.04 * 0.4)))))
+        # ---------- Evidence/Reasoning + Confidence/Uncertainty (triage only) ----------
+        base = float(sum_dict.get("base", 0))
+        lo, hi = float(sum_dict.get("lo", 0)), float(sum_dict.get("hi", 0))
+        base_pct = int(round(100 * base))
+        lo_pct, hi_pct = int(round(100 * lo)), int(round(100 * hi))
+        width = float(sum_dict.get("width", hi - lo))
+
+        # Risk band → tag (distinct from confidence tag)
+        def _risk_tier(r):
+            if r >= 0.40: return ("High", "#DC2626")       # red
+            if r >= 0.20: return ("Medium", "#F59E0B")     # amber
+            if r >= 0.10: return ("Low", "#22C55E")        # green
+            return ("Very Low", "#10B981")
+
+        risk_tier, risk_color = _risk_tier(base)
+
+        # Simple similarity proxy already used in your original code
+        pr = int(round(100 * (0.3
+                              + (0.3 if patient['risk_inputs'].get('ecg_abnormal') else 0)
+                              + (min(0.4, (patient['risk_inputs'].get('troponin') or 0) / 0.04 * 0.4)))))
+
+        # --- Needed inputs (compact tags) ---
+        ri = patient.get("risk_inputs", {})
+        vitals = patient.get("vitals", {})
+        demo_tags = [f"Age {patient.get('age','—')}", f"Sex {patient.get('sex','—')}"]
+        if ri.get("rf_htn"): demo_tags.append("Comorbidity: HTN")
+        if ri.get("rf_dm"):  demo_tags.append("Comorbidity: DM")
+        if ri.get("rf_smoker"): demo_tags.append("Smoker")
+
+        symptom_tags = []
+        for pf in ri.get("pain_features", []) or []:
+            symptom_tags.append(pf.capitalize())
+        cc = (patient.get("chief_complaint") or "").strip()
+        if cc: symptom_tags.append("CC: " + (cc[:28] + "…" if len(cc) > 28 else cc))
+
+        lab_ecg_tags = []
+        lab_ecg_tags.append("ECG: Abnormal" if ri.get("ecg_abnormal") else "ECG: Normal")
+        if ri.get("troponin") is None:
+            lab_ecg_tags.append("Troponin: pending")
+        else:
+            lab_ecg_tags.append(f"hs-cTn: {ri['troponin']:.3f} ng/mL")
+
+        vit_tags = [f"HR {vitals.get('HR','—')}",
+                    f"RR {vitals.get('RR','—')}",
+                    f"SpO₂ {vitals.get('SpO2', vitals.get('SpO₂','—'))}",
+                    f"BP {vitals.get('BP','—')}",
+                    f"T {vitals.get('TempC','—')}°C"]
+
+        pattern_tags = []
+        if ri.get("ecg_abnormal"): pattern_tags.append("Chest-pain + abn. ECG")
+        sbp = str(vitals.get("BP","")).split("/")
+        if len(sbp) == 2 and sbp[0]:
+            try:
+                if int(sbp[0]) < 100: pattern_tags.append("Low BP pattern")
+            except Exception:
+                pass
+        if (ri.get("troponin") or 0) >= 0.01: pattern_tags.append("Troponin↑ pattern")
+        if not pattern_tags: pattern_tags.append("Pattern: non-specific")
+
+        ctxt = patient.get("arrival_mode","—")
+        ctx_tags = []
+        if ctxt and ctxt != "—": ctx_tags.append(f"Arrival: {ctxt}")
+        onset_min = patient.get("data_quality",{}).get("time_from_onset_min", None)
+        if isinstance(onset_min, int): ctx_tags.append(f"Onset {onset_min} min")
+        mental = patient.get("mental_status","")
+        if mental: ctx_tags.append(f"Mental: {mental}")
+
+        def _chip(text, fg="#1f2937", bg="#f3f4f6", bd="#e5e7eb"):
+            return (f"<span style='display:inline-block;border:1px solid {bd};"
+                    f"background:{bg};color:{fg};border-radius:999px;padding:2px 8px;"
+                    f"margin:2px 6px 0 0;font-weight:700;font-size:12px'>{esc(text)}</span>")
+
+        # ---------- Five-aspect uncertainty mix (simple, readable heuristics) ----------
+        dq = patient.get("data_quality", {}) or {}
+        missing = dq.get("missing", []) or []
+        ood = 1.0 if dq.get("ood") else 0.0
+
+        # Heuristics:
+        # - Data gaps → count of missing key fields
+        w_data = min(1.0, 0.45 * len(missing))
+        # - Model familiarity → OOD flag
+        w_fam = 0.60 * ood
+        # - Prediction stability → wider interval => more uncertainty
+        w_stab = max(0.0, (width - 0.10) / 0.25)  # 0 if <=0.10, up to ~1 if very wide
+        # - Human ambiguity → vague/short CC or no symptom detail
+        human_vague = 1.0 if (not symptom_tags or len(" ".join(symptom_tags)) < 10 or len(cc) < 8) else 0.25
+        w_human = 0.40 * human_vague
+        # - Chained decisions (cascading) → mid/high width contributes
+        w_chain = 0.35 if width > 0.18 else (0.15 if width > 0.12 else 0.05)
+
+        raw = [w_data, w_fam, w_stab, w_human, w_chain]
+        total = sum(raw) or 1.0
+        pct5 = [int(round(100 * x / total)) for x in raw]
+        # Normalize to exactly 100%
+        delta = 100 - sum(pct5)
+        if delta != 0:
+            pct5[0] += delta
+
+        labels5 = ["Data gaps", "Model familiarity", "Prediction stability",
+                   "Human ambiguity", "Chained decisions"]
+        expl5 = [
+            ("Missing: " + ", ".join(missing)) if missing else "No key inputs missing",
+            "Outside training distribution" if ood else "Typical for training distribution",
+            f"Interval width ≈ {int(round(100*width))} pts — wider ⇒ less stable",
+            "Unclear/vague narrative or limited symptom detail" if human_vague >= 1.0 else "Clear symptom description",
+            "Uncertainty propagates from triage → disposition choices" if width > 0.12 else "Minimal cross-step carryover",
+        ]
+
+        # Conic pie using CSS (compact) + legend
+        pie_css = (f"background: conic-gradient(#f59e0b 0 {pct5[0]}%, "
+                   f"#6366f1 {pct5[0]}% {pct5[0]+pct5[1]}%, "
+                   f"#22c55e {pct5[0]+pct5[1]}% {pct5[0]+pct5[1]+pct5[2]}%, "
+                   f"#e11d48 {pct5[0]+pct5[1]+pct5[2]}% {pct5[0]+pct5[1]+pct5[2]+pct5[3]}%, "
+                   f"#0ea5e9 {pct5[0]+pct5[1]+pct5[2]+pct5[3]}% 100%);")
+
+        def legend_row(color, label, pct, note):
+            return (f"<div style='display:flex;align-items:flex-start;gap:.5rem;margin:.15rem 0'>"
+                    f"<span style='width:10px;height:10px;background:{color};border-radius:2px;margin-top:4px'></span>"
+                    f"<div style='flex:1'><b>{esc(label)}</b> — {pct}%"
+                    f"<div style='color:#6b7280;font-size:12px'>{esc(note)}</div></div></div>")
+
+        legend = (
+            legend_row("#f59e0b", labels5[0], pct5[0], expl5[0]) +
+            legend_row("#6366f1", labels5[1], pct5[1], expl5[1]) +
+            legend_row("#22c55e", labels5[2], pct5[2], expl5[2]) +
+            legend_row("#e11d48", labels5[3], pct5[3], expl5[3]) +
+            legend_row("#0ea5e9", labels5[4], pct5[4], expl5[4])
+        )
+
+        # ---------- Sections ----------
         section = (
-            h4("Risk & interval") + f"<div><b>Point risk:</b> {base}% • <b>Range:</b> {lo}%–{hi}%</div>" +
-            h4("Pattern recognition") + f"<div>Similarity: <b>{pr}%</b> to {esc(sum_dict.get('suspected_condition','ACS-like'))} cluster.</div>" +
-            h4("Contributing factors") + f"<div>{chips}</div>"
+            # 1) Evidence / Reasoning
+            h4("Evidence / Reasoning") +
+            "<div style='display:flex;align-items:center;gap:.6rem;margin:.15rem 0 .35rem'>"
+            f"<div><b>Risk estimate:</b> {base_pct}%</div>"
+            f"{_badge(risk_tier, tone='neutral')}"
+            "</div>"
+            f"<div style='color:#6b7280;font-size:12px;margin:-2px 0 6px'>"
+            "Risk tag reflects probability band (not confidence).</div>"
+            + h4("Recognized diagnosis") +
+            f"<div>Similarity: <b>{pr}%</b> to {esc(sum_dict.get('suspected_condition','ACS-like'))} pattern.</div>"
+
+            + h4("Needed inputs for this prediction") +
+            "<div style='margin:.25rem 0 .1rem;color:#374151;font-weight:700'>Vital signs</div>"
+            + "".join(_chip(t) for t in vit_tags) +
+            "<div style='margin:.6rem 0 .1rem;color:#374151;font-weight:700'>Chief complaint & symptoms</div>"
+            + ("".join(_chip(t) for t in symptom_tags) or _chip("—")) +
+            "<div style='margin:.6rem 0 .1rem;color:#374151;font-weight:700'>Lab / ECG</div>"
+            + "".join(_chip(t) for t in lab_ecg_tags) +
+            "<div style='margin:.6rem 0 .1rem;color:#374151;font-weight:700'>Demographics</div>"
+            + "".join(_chip(t) for t in demo_tags) +
+            "<div style='margin:.6rem 0 .1rem;color:#374151;font-weight:700'>Clinical pattern recognition</div>"
+            + "".join(_chip(t) for t in pattern_tags) +
+            "<div style='margin:.6rem 0 .1rem;color:#374151;font-weight:700'>Context</div>"
+            + ("".join(_chip(t) for t in ctx_tags) or _chip("—"))
+            + "<hr style='border:none;border-top:1px solid #e5e7eb;margin:12px 0'/>"
+
+            # 2) Confidence / Uncertainty
+            + h4("Confidence & Uncertainty")
+            + "<div style='display:flex;align-items:baseline;gap:.6rem'>"
+            f"<div style='font-size:24px;font-weight:900'>{int(round(conf_score*100))}%</div>"
+            f"{_badge(conf_tier, 'success' if conf_tier=='High' else ('warn' if conf_tier=='Medium' else 'danger'))}"
+            "<div style='font-size:12px;color:#6b7280'>"
+            "Confidence reflects how tight the risk range is.</div></div>"
+            + h4("Risk interval")
+            + f"<div><b>Range:</b> {lo_pct}%–{hi_pct}% "
+            f"(width {int(round(100*width))} pts). "
+            "Intervals come from perturbing inputs & data quality cues; "
+            "narrower ranges generally mean higher confidence.</div>"
+            + h4("Uncertainty composition")
+            + "<div style='display:flex;gap:1rem;align-items:center;margin:.5rem 0'>"
+            f"<div style='width:96px;height:96px;border-radius:50%;{pie_css}'></div>"
+            f"<div style='flex:1'>{legend}</div>"
+            "</div>"
+            + "<div style='color:#6b7280;font-size:12px;margin-top:.25rem'>"
+            "If an aspect contributes 0%, it will still be listed as ‘None’ for completeness.</div>"
         )
     elif scope == "disposition":
         dq = patient.get("data_quality",{}) or {}
