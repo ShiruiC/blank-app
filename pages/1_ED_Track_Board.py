@@ -1,19 +1,15 @@
 # pages/1_ED_Track_Board.py
-# ED Track Board — Chest Pain Triage (AgGrid: click Patient to open chart)
+# ED Track Board — Chest Pain Triage (AgGrid list; no auto-jump to chart)
+# - Exactly three fixed demo patients (Weber / Green / Lopez)
+# - English comments & labels
+# - Same layout & filters as before
+# - Selecting a row only stores it in session_state for Patient Chart to read later
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from st_aggrid.shared import GridUpdateMode, DataReturnMode
-
-# --- jump guard: if flagged, switch immediately and stop ---
-if st.session_state.get("__go_patient_chart__"):
-    st.session_state["__go_patient_chart__"] = False
-    # ✅ Switch by page LABEL (sidebar name) — more robust than file path
-    st.switch_page("Patient Chart")
-    st.stop()  # ensure nothing else renders
 
 st.set_page_config(
     page_title="ED Track Board — Chest Pain",
@@ -22,129 +18,130 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Optional helpers; safely no-op if utils is unavailable
+def _no_op(*a, **k): return None
+try:
+    from utils import init_state, enter_page, show_back_top_right, render_sidebar
+except Exception:
+    init_state = _no_op; enter_page = _no_op; show_back_top_right = _no_op; render_sidebar = _no_op
 
-from utils import init_state, enter_page, show_back_top_right, render_sidebar
 init_state()
 enter_page("ED Track Board")
 render_sidebar(__file__)
 show_back_top_right("← Back")
 
-# ───────── Demo data ─────────
-np.random.seed(7)
+# ───────── Fixed demo patients (NO randomness) ─────────
 now = datetime.now().replace(second=0, microsecond=0)
 
-def demo_rows(n=10):
-    names = ["Weber, Charlotte","Green, Gary","Brown, Beverly","Busch, Amelia",
-             "Johnson, Sally","Adams, Devin","Morales, Miles","Crown, Emma",
-             "Pink, Patsy","Schmidt, Jonas"]
-    
-    FIXED_PROFILES = {
-        "CP-1000": {  # Olivia 对应的示例（可改名）
-            "Patient": "Weber, Charlotte",
-            "Age": 27, "Sex": "Female",
-            "ESI": 2, "HR": 78, "SBP": 164, "SpO₂": 96,
-            "ECG": "Normal", "hs-cTn (ng/L)": None,
-            "OnsetMin": 90, "CC": "Chest pain at rest, mild SOB.",
-            "TempC": 37.0,
-            "Temp": "37.0°C",
-        },
-        "CP-1001": {  # Mark 对应的示例（可改名）
-            "Patient": "Green, Gary",
-            "Age": 59, "Sex": "Male",
-            "ESI": 3, "HR": 141, "SBP": 109, "SpO₂": 91,
-            "ECG": "Normal", "hs-cTn (ng/L)": 0.0,  # 初到院未升高（演示）
-            "OnsetMin": 30, "CC": "Severe chest pressure radiating to left arm, nausea, diaphoresis.",
-            "TempC": 37.0,
-            "Temp": "37.0°C",
-        },
-    }
+# Manual base risk (%) and stability label drive interval & confidence.
+# Approach B mapping:
+#   High -> width 6 pts; Medium -> width 18 pts; Low -> width 30 pts
+def _width_from_stability(label: str) -> int:
+    return {"High": 6, "Medium": 18, "Low": 30}.get(str(label).title(), 18)
 
+def _conf_from_width(width_pts: int) -> str:
+    if width_pts <= 6: return "high"
+    if width_pts <= 12: return "medium"
+    return "low"
+
+def _interval_from_base(base_pct: float, width_pts: int):
+    lo = max(0.0, base_pct - width_pts/2)
+    hi = min(100.0, base_pct + width_pts/2)
+    return round(lo, 1), round(hi, 1)
+
+# Three canonical profiles
+# Keep IDs aligned with Patient Chart (CP-1000 / CP-1001 / CP-1002)
+PATIENTS = [
+    {
+        "PatientID": "CP-1000",
+        "Patient": "Weber, Charlotte",
+        "Age": 28, "Sex": "Female", "ESI": 2,
+        "HR": 82, "SBP": 158, "SpO₂": 97,
+        "ECG": "Normal", "hs-cTn (ng/L)": None,
+        "OnsetMin": 85,
+        "CC": "Chest pain at rest, mild shortness of breath.",
+        "Arrival": (now - timedelta(minutes=41)).strftime("%H:%M"),
+        "Room": "Pod A",
+        "TempC": 37.1, "Temp": "37.1°C",
+        # Manual risk UI inputs
+        "RiskBase%": 10.0, "Stability": "Medium",
+        # Unc. reason examples for display only
+        "UncReasonSeed": ["troponin pending"]
+    },
+    {
+        "PatientID": "CP-1001",
+        "Patient": "Green, Gary",
+        "Age": 60, "Sex": "Male", "ESI": 3,
+        "HR": 106, "SBP": 136, "SpO₂": 95,
+        "ECG": "Nonspecific", "hs-cTn (ng/L)": 12.0,
+        "OnsetMin": 40,
+        "CC": "Severe chest pressure radiating to left arm, nausea, diaphoresis.",
+        "Arrival": (now - timedelta(minutes=22)).strftime("%H:%M"),
+        "Room": "Pod B",
+        "TempC": 36.9, "Temp": "36.9°C",
+        "RiskBase%": 22.0, "Stability": "Medium",
+        "UncReasonSeed": ["nonspecific ECG"]
+    },
+    {
+        "PatientID": "CP-1002",
+        "Patient": "Lopez, Mariah",
+        "Age": 44, "Sex": "Female", "ESI": 3,
+        "HR": 94, "SBP": 128, "SpO₂": 98,
+        "ECG": "ST/T abn", "hs-cTn (ng/L)": 58.0,
+        "OnsetMin": 25,
+        "CC": "Acute chest tightness with diaphoresis during activity.",
+        "Arrival": (now - timedelta(minutes=7)).strftime("%H:%M"),
+        "Room": "WRM",
+        "TempC": 37.3, "Temp": "37.3°C",
+        "RiskBase%": 68.0, "Stability": "Low",
+        "UncReasonSeed": ["high troponin", "abnormal ECG"]
+    },
+]
+
+def _build_df() -> pd.DataFrame:
     rows = []
-    for i in range(n):
-        pid = f"CP-{1000+i}"
-        troponin_missing = np.random.rand() < 0.35
-        hr  = int(np.random.normal(84, 18))
-        sbp = int(np.random.normal(132, 22))
-        spo2 = int(np.clip(np.random.normal(96, 3), 85, 100))
-        esis = np.random.choice([2,3,4], p=[0.2,0.55,0.25])
-        ecg_flags = np.random.choice(["ST/T abn","Normal","Nonspecific"], p=[0.25,0.5,0.25])
-        hsctn = None if troponin_missing else round(max(0, np.random.normal(12, 18)),1)
+    for p in PATIENTS:
+        base = float(p["RiskBase%"])
+        width_pts = _width_from_stability(p["Stability"])
+        lo, hi = _interval_from_base(base, width_pts)
+        conf = _conf_from_width(width_pts)
+        # Next Steps (very lightweight)
+        next_steps = []
+        if p["hs-cTn (ng/L)"] is None: next_steps.append("Confirm: draw hs-cTn now")
+        if conf == "low": next_steps.append("Consult: senior/ACS pathway")
+        if base >= 20:   next_steps.append("Observe: continuous ECG + vitals")
+        if base < 5 and conf != "low": next_steps.append("Defer: discharge w/ next-day FU")
 
-        # ✅ generate Celsius for everyone
-        temp_c = round(np.random.normal(37.0, 0.5), 1)
-
-        row = {
-            "PatientID": pid,
-            "Arrival": (now - timedelta(minutes=np.random.randint(3, 120))).strftime("%H:%M"),
-            "Patient": names[i % len(names)],
-            "Age": int(np.random.normal(52, 18)),
-            "Sex": np.random.choice(["Male","Female"]),
-            "ESI": esis, "HR": hr, "SBP": sbp, "SpO₂": spo2,
-            "ECG": ecg_flags, "hs-cTn (ng/L)": hsctn,
-            "OnsetMin": np.random.randint(15, 180),
-            "CC": "Chest pain.",
-            "Room": np.random.choice(["WRM","Pod A","Pod B","Fast Track"], p=[0.4,0.3,0.2,0.1]),
-            "TempC": temp_c,                  # ✅ numeric for logic
-            "Temp": f"{temp_c:.1f}°C",        # ✅ pretty string for display
-
-        }
-
-        # ✅ 如果在固定名单里，就用固定资料覆盖随机值
-        if pid in FIXED_PROFILES:
-            row.update(FIXED_PROFILES[pid])
-
-        rows.append(row)
-
+        rows.append({
+            "PatientID": p["PatientID"],
+            "Arrival": p["Arrival"],
+            "Patient": p["Patient"],
+            "Age": p["Age"], "Sex": p["Sex"],
+            "ESI": p["ESI"], "HR": p["HR"], "SBP": p["SBP"], "SpO₂": p["SpO₂"],
+            "ECG": p["ECG"], "hs-cTn (ng/L)": p["hs-cTn (ng/L)"],
+            "OnsetMin": p["OnsetMin"], "CC": p["CC"], "Room": p["Room"],
+            "TempC": p["TempC"], "Temp": p["Temp"],
+            # Risk / uncertainty
+            "Risk %": round(base, 1),
+            "Risk Lo": lo, "Risk Hi": hi,
+            "Confidence": conf,
+            "Uncertainty Reason": ", ".join(p.get("UncReasonSeed") or []) or "—",
+            "Next Steps": " · ".join(next_steps) if next_steps else "—",
+        })
     return pd.DataFrame(rows)
 
-df = demo_rows(10)
+df = _build_df()
 
-# ───────── Risk & Uncertainty (prototype) ─────────
-def compute_risk_and_uncertainty(row: pd.Series):
-    score = 0
-    if row.HR >= 100: score += 1.0
-    if row.SBP < 100 or row.SBP > 180: score += 1.0
-    if row["SpO₂"] < 93: score += 1.0
-    if row.ECG == "ST/T abn": score += 2.0
-    elif row.ECG == "Nonspecific": score += 0.5
-    if row.ESI == 2: score += 1.0
-
-    reasons = []
-    if pd.notna(row["hs-cTn (ng/L)"]):
-        tn = row["hs-cTn (ng/L)"]
-        if tn >= 52: score += 3.0; reasons.append("high troponin")
-        elif tn >= 14: score += 1.5; reasons.append("borderline troponin")
-    else:
-        reasons.append("missing troponin")
-
-    risk = 100 * (1 / (1 + np.exp(-(score - 2.5))))
-    risk = float(np.clip(risk, 1, 95))
-
-    width = 6
-    if pd.isna(row["hs-cTn (ng/L)"]): width += 10
-    if row.ECG == "Nonspecific": width += 4
-    if row["SpO₂"] < 93 or row.SBP < 100: width += 3
-    width = min(width, 30)
-
-    lo = max(0.0, risk - width/2); hi = min(100.0, risk + width/2)
-    conf = "high" if width <= 6 else ("medium" if width <= 12 else "low")
-
-    next_steps = []
-    if pd.isna(row["hs-cTn (ng/L)"]): next_steps.append("Confirm: draw hs-cTn now")
-    if conf == "low": next_steps.append("Consult: senior/ACS pathway")
-    if risk >= 20:   next_steps.append("Observe: continuous ECG + vitals")
-    if risk < 5 and conf != "low": next_steps.append("Defer: discharge w/ next-day FU")
-
-    return round(risk,1), round(lo,1), round(hi,1), conf, ", ".join(reasons) if reasons else "—", " · ".join(next_steps) if next_steps else "—"
-
-calc = df.apply(compute_risk_and_uncertainty, axis=1)
-df[["Risk %","Risk Lo","Risk Hi","Confidence","Uncertainty Reason","Next Steps"]] = pd.DataFrame(calc.tolist(), index=df.index)
+# Save the master in session_state so Patient Chart can read it
+st.session_state["trackboard_df"] = df.copy()
+st.session_state.setdefault("selected_patient_id", None)
+st.session_state.setdefault("selected_patient_name", None)
 
 # ───────── Header  ─────────
 st.title("ED Track Board — Chest Pain Triage")
 st.caption("List view with arrival, ESI, vitals, ECG/troponin, risk with interval, confidence badge, and actionable next steps.")
 
-# ───────── Filters under header ─────────
+# ───────── Filters  ─────────
 colf1, colf2, colf3 = st.columns([1,1,2])
 with colf1:
     sort_by = st.selectbox("Sort by", ["Arrival","Risk %","ESI"])
@@ -165,7 +162,7 @@ if min_conf != "any":
 ascending = True if sort_by in ["Arrival","ESI"] else False
 work = work.sort_values(sort_by, ascending=ascending).reset_index(drop=True)
 
-# ───────── Build derived display columns ─────────
+# ───────── Derived display columns ─────────
 def risk_badge_text(r, lo, hi):
     band = f"{int(round(r))}% [{int(round(lo))}–{int(round(hi))}%]"
     if r >= 20: return f"🟥 {band}"
@@ -189,28 +186,24 @@ if "Confidence" in show_cols and "Conf" not in final_cols:
 
 disp_for_grid = disp[["PatientID"] + final_cols].copy()
 
-# ───────── AgGrid config: click Patient to open ─────────
-# 让患者页能读到当前板上的数据
-st.session_state["trackboard_df"] = df          # 或者存 work/disp，看患者页需要的列
-st.session_state.setdefault("selected_patient_id", None)
-st.session_state.setdefault("selected_patient_name", None)
-
+# ───────── AgGrid config (no auto-jump; selection only) ─────────
 gb = GridOptionsBuilder.from_dataframe(disp_for_grid)
 
-# 0) 关闭编辑，防止“Invalid …”
+# 0) lock editing
 gb.configure_default_column(editable=False)
 
-# 1) 用官方的 selection 配置（比直接塞到 gridOptions 更稳）
+# 1) official selection API
 gb.configure_selection(selection_mode="single", use_checkbox=False)
 
-# 2) 其他关键选项：禁止点击进入编辑 + 指定唯一行ID（避免排序/过滤后选中丢失）
+# 2) stable row id
 gb.configure_grid_options(
     suppressClickEdit=True,
     stopEditingWhenCellsLoseFocus=True,
     domLayout="autoHeight",
-    getRowId=JsCode("function(p){ return p.data.PatientID; }"),  # 关键：行唯一键
+    getRowId=JsCode("function(p){ return p.data.PatientID; }"),
 )
-# 3) 新增一个 "Open" 按钮列 —— 点击时只做“选中该行”
+
+# 3) "Open" button column — only selects row (no navigation)
 open_btn_renderer = JsCode("""
 class BtnCellRenderer {
   init(params){
@@ -221,7 +214,7 @@ class BtnCellRenderer {
     e.style.cursor = 'pointer';
     e.addEventListener('click', () => {
       params.api.deselectAll();
-      params.api.selectNode(params.node, true); // 触发 selection changed
+      params.api.selectNode(params.node, true); // selection changed
     });
     this.eGui = e;
   }
@@ -229,75 +222,59 @@ class BtnCellRenderer {
 }
 """)
 
-# 在 DataFrame 里加一列占位（显示按钮）
 if "Open" not in disp_for_grid.columns:
     disp_for_grid.insert(1, "Open", "Open")
 
 gb.configure_column("Open", header_name="", width=90,
                     editable=False, cellRenderer=open_btn_renderer)
 
-# 4) 外观
+# 4) visual tweaks
 gb.configure_column("Patient", cellStyle={"color":"#1f77b4","textDecoration":"underline","cursor":"pointer"})
 gb.configure_column("PatientID", header_name="ID", width=90)
-# …列宽循环保持不变…
 
 grid = AgGrid(
     disp_for_grid,
     gridOptions=gb.build(),
-    update_mode=GridUpdateMode.SELECTION_CHANGED,      # 选中变化就回传
+    update_mode=GridUpdateMode.SELECTION_CHANGED,      # return selection events
     data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
     allow_unsafe_jscode=True,
     theme="streamlit",
     fit_columns_on_grid_load=False,
-    key="track_board_grid_v3"
+    key="track_board_grid_fixed3"
 )
 
-resp = grid  # (AgGrid(...) return)
-
+resp = grid
 sel_raw = resp.get("selected_rows")
 if sel_raw is None:
     sel = []
 elif isinstance(sel_raw, pd.DataFrame):
-    # convert DF -> list[dict] to match the rest of your code
     sel = sel_raw.to_dict("records")
 else:
-    sel = sel_raw  # already a list
+    sel = sel_raw
 
-st.caption(f"DEBUG selected_rows_type: {type(sel).__name__} • count: {len(sel)}")
-
+# Store the selected row for the Patient Chart page (no auto-switch)
 if sel:
     row  = sel[0]
     pid  = row["PatientID"]
     name = row["Patient"]
-
     st.session_state["selected_patient_id"] = pid
     st.session_state["selected_patient_name"] = name
     st.session_state["selected_patient"] = row
+    st.success(f"Selected **{name}** ({pid}). Open the Patient Chart page to view details.")
+else:
+    st.info("Select a row to make it available in the Patient Chart page.")
 
-    if st.session_state.get("_last_opened_id") != pid:
-        st.session_state["_last_opened_id"] = pid
-        st.session_state["__go_patient_chart__"] = True   # 让顶部守卫去跳页
-        st.rerun()
-
-    # if st.session_state.get("_last_opened_id") != pid:
-    #     st.session_state["_last_opened_id"] = pid
-    #     try:
-    #         st.switch_page("pages/2_Patient_Chart.py")
-    #     except Exception as e:
-    #         st.info(f"Selected **{name}** ({pid}).")
-    #         st.page_link("pages/2_Patient_Chart.py", label="➡️ Open Patient Chart", icon="🩺")
-    #         st.caption(f"(Hint: run **streamlit_app.py** as the entrypoint. {type(e).__name__}: {e})")
-    
 # ───────── Legend ─────────
 with st.expander("Legend • Uncertainty & Action Rules", expanded=False):
     st.markdown("""
 **Risk badge** shows a **point estimate + interval** (e.g., *12% [8–18%]*).  
-The **interval widens automatically** when data quality is weak (e.g., **missing hs-cTn**, nonspecific ECG, unstable vitals).
+The **interval width** is a visual encoding of **prediction stability**:
+**High → 6 pts**, **Medium → 18 pts**, **Low → 30 pts**.
 
-**Confidence** is mapped from interval width: **High / Medium / Low**.  
+**Confidence** maps from interval width: **High / Medium / Low**.  
 When **Low**, human oversight is recommended (**Consult**).
 
-**Next Steps** (DP3) use four slots:  
+**Next Steps** use four slots:  
 - **Confirm** — obtain missing tests (e.g., draw hs-cTn).  
 - **Observe** — continuous ECG and vital monitoring.  
 - **Consult** — senior review / ACS pathway.  

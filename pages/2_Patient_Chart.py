@@ -1,8 +1,112 @@
 # pages/2_Patient_Chart.py
+# Patient Chart — keeps prior layout, three fixed patients, search bar
+# Adds: Evidence / Reasoning section (with decisive inputs chips) inside the Uncertainty drawer (triage scope)
+
 import streamlit as st
 from html import escape
 
-# ── Uncertainty side-panel (pure Streamlit, no iframe)
+# ── Drawer helpers & uncertainty panel (pure Streamlit, no iframe) ─────────────────────────────────────
+
+def _drawer_cols(opened: bool):
+    """Return (left, right) columns. When closed, right is eliminated so content spans full width."""
+    if opened:
+        return st.columns([0.68, 0.32], vertical_alignment="top")
+    else:
+        left = st.container()
+        right = st.container()  # placeholder
+        return left, right
+
+def _open_drawer(scope: str, triage_label: str = "", dispo_label: str = ""):
+    st.session_state["why_open"] = True
+    st.session_state["why_scope"] = scope
+    if triage_label: st.session_state["why_triage_label"] = triage_label
+    if dispo_label:  st.session_state["why_dispo_label"]  = dispo_label
+
+def _close_drawer():
+    st.session_state["why_open"] = False
+
+# ── Safe utils import (optional)
+def _no_op(*a, **k): return None
+try:
+    from utils import init_state as _init_state, enter_page as _enter_page, show_back_top_right as _show_back, render_sidebar as _render_sidebar
+except Exception:
+    _init_state = _no_op; _enter_page = _no_op; _show_back = _no_op; _render_sidebar = _no_op
+
+# Core patient helpers
+from components.patient_view import (
+    make_patient_from_row, compute_summary,
+    triage_level_from_summary, disposition_from_summary,
+    decompose_uncertainty
+)
+
+# ── Fixed interview-friendly patient seeds (aligned to Track Board) ─────────────────────────────────────
+# (Only these 3 will have detailed charts; we still keep the search bar UI.)
+FIXED_PROFILES = {
+    "CP-1000": {"MRN":"CP-1000","Patient":"Weber, Charlotte","Age":28,"Sex":"Female","ESI":2,
+                "HR":82,"SBP":158,"SpO₂":97,"TempC":37.1,"ECG":"Normal","hs-cTn (ng/L)":None,
+                "OnsetMin":85,"CC":"Chest pain at rest, mild shortness of breath.","Arrival":"Ambulance"},
+    "CP-1001": {"MRN":"CP-1001","Patient":"Green, Gary","Age":60,"Sex":"Male","ESI":3,
+                "HR":106,"SBP":136,"SpO₂":95,"TempC":36.9,"ECG":"Nonspecific","hs-cTn (ng/L)":12.0,
+                "OnsetMin":40,"CC":"Severe chest pressure radiating to left arm, nausea, diaphoresis.","Arrival":"Walk-in"},
+    "CP-1002": {"MRN":"CP-1002","Patient":"Lopez, Mariah","Age":44,"Sex":"Female","ESI":3,
+                "HR":94,"SBP":128,"SpO₂":98,"TempC":37.3,"ECG":"ST/T abn","hs-cTn (ng/L)":58.0,
+                "OnsetMin":25,"CC":"Acute chest tightness with diaphoresis during activity.","Arrival":"Ambulance"},
+}
+
+# ── Drawer state
+st.session_state.setdefault("why_open", False)
+st.session_state.setdefault("why_scope", "triage")
+st.session_state.setdefault("why_triage_label", "")
+st.session_state.setdefault("why_dispo_label", "")
+
+TRIAGE_LEVELS = {
+    "T1": ("Immediate",     "Highest probability for intensive care, emergency procedure, or mortality.", "#DC2626"),
+    "T2": ("Very Urgent",   "Elevated probability for intensive care, emergency procedure, or mortality.", "#F97316"),
+    "T3": ("Urgent",        "Moderate probability of hospital admission or very low probability of intensive care, emergency procedure, or mortality.", "#F59E0B"),
+    "T4": ("Less Urgent",   "Low probability of hospital admission.", "#22C55E"),
+    "T5": ("Non-Urgent",    "Fast turnaround and low probability of hospital admission.", "#10B981"),
+}
+DISP_LEVELS = {
+    "Confirm/Admit":  "Admit or confirm acute management plan — likely inpatient treatment.",
+    "Observe":        "Monitor in observation unit — reassess after a short period.",
+    "Consult":        "Seek specialist input before final decision.",
+    "Defer/Discharge":"Safe for discharge — provide safety-net and follow-up.",
+}
+
+def _pill(text, tone="#2563EB", inverse=False):
+    return (
+        "<span style='border-radius:999px;padding:.25rem .6rem;border:1px solid {tone};"
+        "margin:.15rem .25rem .15rem 0;display:inline-block;"
+        "background:{bg};color:{fg};font-weight:700'>{t}</span>"
+    ).format(tone=tone, bg=(tone if inverse else "transparent"), fg=("white" if inverse else tone), t=text)
+
+def _chip(text, bg="#3B82F6"):
+    return f"<span style='border-radius:999px;padding:.25rem .6rem;background:{bg};color:#fff;margin-right:.35rem;margin-bottom:.35rem;display:inline-block;font-weight:600'>{escape(text)}</span>"
+
+def patient_header(name: str, mrn: str, ui: dict) -> None:
+    left, right = st.columns([0.70, 0.30], vertical_alignment="center")
+    with left:
+        st.markdown(f"## {name}")
+        st.caption(f"MRN: {mrn}")
+    with right:
+        st.radio("View", ["Patient", "Clinicians"], horizontal=True, index=1, label_visibility="collapsed")
+
+def render_dispo_list(ai_dispo: str):
+    for k, desc in DISP_LEVELS.items():
+        is_ai = (k == ai_dispo)
+        st.markdown(
+            f"""
+            <div style="border:1px solid {'#3B82F6' if is_ai else '#e5e7eb'};border-radius:10px;padding:10px 12px;margin:.35rem 0;
+                        background:{'#EEF2FF' if is_ai else 'white'};display:flex;gap:.6rem;align-items:flex-start">
+              <div style="min-width:120px;font-weight:700">{escape(k)}</div>
+              <div style="color:#374151">{escape(desc)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+# ── Uncertainty side-panel (with the Evidence / Reasoning block you requested) ─────────────────────────
+
 def _render_uncertainty_panel(scope_here: str):
     """
     Scope-aware panel. Opens ONLY from the ❓ button for this scope.
@@ -10,8 +114,9 @@ def _render_uncertainty_panel(scope_here: str):
     """
     is_open   = bool(st.session_state.get("why_open"))
     scope_now = st.session_state.get("why_scope")
-
     open_here = bool(is_open and scope_now == scope_here)
+    if not open_here:
+        return
 
     # Shared CSS
     st.markdown("""
@@ -24,18 +129,13 @@ def _render_uncertainty_panel(scope_here: str):
     </style>
     """, unsafe_allow_html=True)
 
-    # If this scope is not open, render nothing on the right (no opener/handle).
-    if not open_here:
-        return
-
-    # Close-only handle (no open action here)
+    # Close-only handle
     c_top = st.columns([0.92, 0.08])
     with c_top[1]:
         if st.button("≪", key=f"ua_collapse_{scope_here}", help="Hide details", type="secondary"):
             _close_drawer()
             st.stop()
 
-    # Full panel content
     with st.container(border=True):
         st.markdown('<div class="ua-panel">', unsafe_allow_html=True)
 
@@ -46,14 +146,8 @@ def _render_uncertainty_panel(scope_here: str):
             st.markdown('</div>', unsafe_allow_html=True)
             return
 
-        # Lazy import to avoid circulars if any
-        from components.patient_view import decompose_uncertainty
-
         alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(summary, patient)
         conf_pct = int(round(conf_score*100))
-
-        tri_lbl  = st.session_state.get("why_triage_label","")
-        disp_lbl = st.session_state.get("why_dispo_label","")
 
         if scope_here == "triage":
             # ---------- Prep ----------
@@ -62,6 +156,10 @@ def _render_uncertainty_panel(scope_here: str):
             width    = float(summary.get("width", hi-lo))
             base_pct = int(round(100*base)); lo_pct = int(round(100*lo)); hi_pct = int(round(100*hi))
 
+            def _badge_html(text, fg="#111827", bd="#e5e7eb", bg="#fff"):
+                return (f"<span style='display:inline-block;border:1px solid {bd};background:{bg};color:{fg};"
+                        f"border-radius:999px;padding:2px 8px;margin-left:8px;font-weight:800'>{escape(text)}</span>")
+
             def _risk_tier(r):
                 if r >= 0.40: return ("High", "#DC2626")
                 if r >= 0.20: return ("Medium", "#F59E0B")
@@ -69,60 +167,30 @@ def _render_uncertainty_panel(scope_here: str):
                 return ("Very Low", "#10B981")
             risk_tier, risk_color = _risk_tier(base)
 
-            ri = patient.get("risk_inputs", {})
+            ri = dict(patient.get("risk_inputs", {}))  # local copy we can enrich for chips
             vitals = patient.get("vitals", {})
 
-            # similarity proxy (same logic as before)
+            # Interview-oriented enrichment for decisive chips:
+            # - put chief complaint text and symptoms/pain_features into ri
+            ri["chief_complaint"] = patient.get("chief_complaint", "")
+            # treat pain_features as 'symptoms' too for chip detection
+            pf_list = ri.get("pain_features") or []
+            ri["symptoms"] = list(pf_list)
+            # provide a textual ecg for chip logic
+            ri["ecg"] = ("Abnormal" if ri.get("ecg_abnormal") else "Normal")
+
+            # similarity proxy (kept)
             sim_pct = int(round(100 * (0.3
                                        + (0.3 if ri.get('ecg_abnormal') else 0)
                                        + (min(0.4, (ri.get('troponin') or 0)/0.04 * 0.4)))))
 
-            # --- helpers ---
-            def _chip_html(text, fg="#1f2937", bg="#f3f4f6", bd="#e5e7eb"):
-                return (f"<span style='display:inline-block;border:1px solid {bd};background:{bg};color:{fg};"
-                        f"border-radius:999px;padding:2px 8px;margin:4px 6px 0 0;font-weight:700;font-size:12px'>{escape(text)}</span>")
-            def _chips_line(items):
-                return "".join(_chip_html(t) for t in (items or ["—"]))
-            def _badge_html(text, fg="#111827", bd="#e5e7eb", bg="#fff"):
-                return (f"<span style='display:inline-block;border:1px solid {bd};background:{bg};color:{fg};"
-                        f"border-radius:999px;padding:2px 8px;margin-left:8px;font-weight:800'>{escape(text)}</span>")
-
-            # Build tag lists (horizontal display by rendering once per category)
-            vit_tags = [f"HR {vitals.get('HR','—')}",
-                        f"RR {vitals.get('RR','—')}",
-                        f"SpO₂ {vitals.get('SpO2', vitals.get('SpO₂','—'))}",
-                        f"BP {vitals.get('BP','—')}",
-                        f"T {vitals.get('TempC','—')}°C"]
-
-            symp_tags = [pf.capitalize() for pf in ri.get("pain_features", []) or []]
-            cc = (patient.get("chief_complaint") or "").strip()
-            if cc: symp_tags.append("CC: " + (cc[:48] + "…" if len(cc) > 48 else cc))
-
-            lab_ecg_tags = []
-            lab_ecg_tags.append("ECG: Abnormal" if ri.get("ecg_abnormal") else "ECG: Normal")
-            lab_ecg_tags.append("Troponin: pending" if ri.get("troponin") is None
-                                else f"hs-cTn: {ri['troponin']:.3f} ng/mL")
-
-            demo_tags = [f"Age {patient.get('age','—')}", f"Sex {patient.get('sex','—')}"]
-            if ri.get("rf_htn"): demo_tags.append("Comorbidity: HTN")
-            if ri.get("rf_dm"):  demo_tags.append("Comorbidity: DM")
-            if ri.get("rf_smoker"): demo_tags.append("Smoker")
-
-            pattern_tags = []
-            if ri.get("ecg_abnormal"): pattern_tags.append("Chest-pain + abn. ECG")
-            if (ri.get("troponin") or 0) >= 0.01: pattern_tags.append("Troponin↑ pattern")
-            if not pattern_tags: pattern_tags.append("Pattern: non-specific")
-
-            ctx_tags = []
-            am = patient.get("arrival_mode","—")
-            if am and am != "—": ctx_tags.append(f"Arrival: {am}")
+            # Bring in onset minutes for chips
             onset_min = patient.get("data_quality",{}).get("time_from_onset_min", None)
-            if isinstance(onset_min, int): ctx_tags.append(f"Onset {onset_min} min")
 
             # ---------- 1) Evidence / Reasoning ----------
             st.subheader("Evidence / Reasoning")
 
-            # Risk estimate with inline tag (kept)
+            # Risk estimate with inline tag
             st.markdown(
                 f"<div style='display:flex;align-items:center;gap:.25rem;'>"
                 f"<div><b>Risk estimate:</b> {base_pct}%</div>"
@@ -132,10 +200,16 @@ def _render_uncertainty_panel(scope_here: str):
             )
             st.caption("How likely near-term deterioration is and how sick the patient is right now.")
 
-            # Recognized diagnosis (kept)
+            # Recognized diagnosis
             st.markdown(f"**Recognized diagnosis:** similarity **{sim_pct}%** to {escape(summary.get('suspected_condition','ACS-like'))} pattern.")
 
-            # ---------- Decisive inputs only (chips) ----------
+            # Decisive inputs only (chips) — your requested block
+            def _chips_line(items):
+                def _chip_html(text, fg="#1f2937", bg="#f3f4f6", bd="#e5e7eb"):
+                    return (f"<span style='display:inline-block;border:1px solid {bd};background:{bg};color:{fg};"
+                            f"border-radius:999px;padding:2px 8px;margin:4px 6px 0 0;font-weight:700;font-size:12px'>{escape(text)}</span>")
+                return "".join(_chip_html(t) for t in (items or ["—"]))
+
             def _decisive_inputs():
                 chips = []
 
@@ -170,7 +244,8 @@ def _render_uncertainty_panel(scope_here: str):
                 def _has(s): return s in symps
                 if any(_has(k) for k in ["chest pain", "pressure"]):
                     chips.append("Chest pain/pressure")
-                if _has("rest"): chips.append("Pain at rest")
+                if _has("rest"):
+                    chips.append("Pain at rest")
                 if any(_has(k) for k in ["shortness of breath","sob","dyspnea"]):
                     chips.append("Dyspnea")
                 # High-risk pain qualifiers gathered earlier
@@ -205,7 +280,7 @@ def _render_uncertainty_panel(scope_here: str):
                 try:
                     age = int(patient.get("Age") or patient.get("age") or 0)
                     if age >= 65: chips.append("Age ≥65")
-                    elif age <= 18 and age > 0: chips.append("Age ≤18")
+                    elif 0 < age <= 18: chips.append("Age ≤18")
                 except Exception:
                     pass
 
@@ -224,41 +299,18 @@ def _render_uncertainty_panel(scope_here: str):
                 return uniq
 
             decisive = _decisive_inputs()
-
             st.markdown("**Decisive inputs for this prediction**")
             if decisive:
                 st.markdown(_chips_line(decisive), unsafe_allow_html=True)
             else:
                 st.caption("No decisive findings beyond baseline; inputs were within normal ranges.")
 
-            # # ---------- Optional: brief supportive signals block (kept compact) ----------
-            # signals = []
-            # am_raw = (patient.get("arrival_mode") or "")
-            # if ("ambul" in am_raw.lower()) or ("ems" in am_raw.lower()):
-            #     signals.append("Arrived by ambulance (higher acuity)")
-            # if isinstance(onset_min, int) and onset_min <= 90:
-            #     signals.append("Early presentation (≤ 90 min from onset)")
-            # try:
-            #     sbp_val = int(str(vitals.get("BP","").split("/")[0])); 
-            #     if sbp_val >= 140: signals.append("Hypertensive (SBP ≥ 140)")
-            # except Exception: pass
-            # try:
-            #     if int(vitals.get("HR", 0)) >= 100: signals.append("Tachycardia (HR ≥ 100)")
-            # except Exception: pass
-            # if signals:
-            #     st.caption("Other reasoning signals: " + " · ".join(signals))
-
             st.divider()
 
             # ---------- 2) Confidence & Uncertainty ----------
-            # NOTE: we now compute 'human_vague' so that clear text => 0 extra uncertainty (Change #5)
-            # and we scale chained-decisions down for triage (Change #6).
-            alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(summary, patient)
-            conf_pct = int(round(conf_score*100))
-            st.subheader("Confidence & Uncertainty")
-
-            # (Change #1 + #2) One-row confidence with solid traffic-light pill and new wording
+            # Compact one-row confidence with traffic-light pill
             pill_bg = {"High":"#16a34a","Medium":"#f59e0b","Low":"#f97316"}[conf_tier]
+            st.subheader("Confidence & Uncertainty")
             st.markdown(
                 f"""
                 <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap">
@@ -273,26 +325,22 @@ def _render_uncertainty_panel(scope_here: str):
             )
             st.caption("How confident is the AI in the triage recommendation?")
 
-            # ---------- Uncertainty composition (five aspects) ----------
+            # Five-aspect composition (interval now lives under Prediction stability)
             dq = patient.get("data_quality", {}) or {}
             missing = dq.get("missing", []) or []
             ood = 1.0 if dq.get("ood") else 0.0
 
-            # Local definitions reused below
-            def _int(x): 
-                try: return int(x)
-                except: return None
+            # Human ambiguity: simple proxy by symptom text length
+            cc_txt = (ri.get("chief_complaint") or "")
+            symp_txt_len = len(" ".join([cc_txt] + [s for s in (ri.get("pain_features") or [])]))
+            is_clear = bool(cc_txt) and symp_txt_len >= 12
+            human_vague = 0.0 if is_clear else 1.0
 
-            # Human ambiguity: if symptom text is present & reasonably descriptive -> 0, else >0
-            symp_txt_len = len(" ".join([cc] + [s for s in (ri.get("pain_features") or [])]))
-            is_clear = bool(cc) and symp_txt_len >= 12
-            human_vague = 0.0 if is_clear else 1.0  # Change #5 — no residual if clear
-            # Five weights
-            w_data = min(1.0, 0.45 * len(missing))      # data gaps
-            w_fam  = 0.60 * ood                         # model familiarity
-            w_stab = max(0.0, (width - 0.10) / 0.25)    # prediction stability (interval lives here now)
-            # chained decisions: Not applicable at triage (0%)
-            w_chain = 0.0
+            # Weights
+            w_data = min(1.0, 0.45 * len(missing))         # data gaps
+            w_fam  = 0.60 * ood                            # model familiarity
+            w_stab = max(0.0, (width - 0.10) / 0.25)       # prediction stability (interval)
+            w_chain = 0.0                                   # not applicable at triage
             w_human = 0.40 * human_vague
 
             raw = [w_data, w_fam, w_stab, w_human, w_chain]
@@ -318,12 +366,12 @@ def _render_uncertainty_panel(scope_here: str):
                 unsafe_allow_html=True
             )
 
-            # Legend — with interval now under Prediction stability (Change #3)
+            # Legend — with interval text
             labels = ["Data gaps","Model familiarity","Prediction stability","Human ambiguity","Chained decisions"]
             expl = [
                 ("Missing: " + ", ".join(missing)) if missing else "No key inputs missing",
                 "Outside training distribution" if ood else "Typical for training distribution",
-                 f"Risk interval ≈ {lo_pct}%–{hi_pct}% (width {int(round(100*width))} pts) — from (a) small input perturbations in this model and (b) cross-model comparisons. See details below.",
+                f"Risk interval ≈ {lo_pct}%–{hi_pct}% (width {int(round(100*width))} pts) — from (a) small input perturbations and (b) cross-model spread.",
                 "Unclear/vague narrative" if not is_clear else "Clear symptom description (0%)",
                 "Not applicable at triage (0%)",
             ]
@@ -337,11 +385,9 @@ def _render_uncertainty_panel(scope_here: str):
                     unsafe_allow_html=True
                 )
 
-            # ---------- Prediction stability detail (Change #3 + #4) ----------
+            # Prediction stability detail
             st.markdown("**Prediction stability — details**")
-
             with st.container(border=True):
-                # Top line: make the interval obvious
                 st.markdown(
                     f"<div style='font-size:15px;margin-bottom:6px'><b>Overall risk interval:</b> "
                     f"{lo_pct}%–{hi_pct}% "
@@ -350,8 +396,7 @@ def _render_uncertainty_panel(scope_here: str):
                 )
                 st.caption("Interval combines two views of stability: (A) small input changes with the same model, and (B) cross-model spread with the same inputs.")
 
-                # A) Same model, small input changes (local sensitivity)
-                st.markdown("_A) Same model, small input changes_")
+                # A) Same model, small input changes (local sensitivity — simple illustrative table)
                 delta_up   = max(1, int(round(100*min(0.04, width/3))))
                 delta_down = max(0, int(round(100*min(0.03, width/4))))
                 st.table({
@@ -359,8 +404,7 @@ def _render_uncertainty_panel(scope_here: str):
                     "Δ Risk (points)": [f"+{delta_up}", f"+{max(0,delta_up-1)}", f"+{max(1,delta_up)}", f"+{max(0,delta_down)}"],
                 })
 
-                # B) Same inputs, different models (cross-model variance)
-                st.markdown("_B) Same inputs, different models_")
+                # B) Same inputs, different models (cross-model variance — illustrative)
                 def clip01(x): return max(0, min(1, x))
                 m1 = clip01(base + 0.5*width - 0.03)   # Logistic (proxy)
                 m2 = clip01(base - 0.4*width + 0.01)   # XGBoost (proxy)
@@ -370,15 +414,8 @@ def _render_uncertainty_panel(scope_here: str):
                     "Risk %": [int(round(100*m1)), int(round(100*m2)), int(round(100*m3))],
                 })
 
-                st.caption(
-                            "This interval (26–41 %) comes from combining two sources: "
-                            "(A) repeating the same model with slightly varied inputs (Δ≈3–4 pts), "
-                            "and (B) using different model architectures with the same data (spread ≈ 10 pts). "
-                            "Together they suggest a *moderate* prediction stability — consistent but not fully tight."
-)
-
         elif scope_here == "disposition":
-            st.subheader(f"Why Disposition: {disp_lbl}")
+            st.subheader(f"Why Disposition: {st.session_state.get('why_dispo_label','')}")
             dq = patient.get("data_quality",{}) or {}
             missing = dq.get("missing", [])
             wid_pct = int(round(100*summary.get("width",0.0)))
@@ -402,99 +439,7 @@ def _render_uncertainty_panel(scope_here: str):
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Drawer helpers
-def _drawer_cols(opened: bool):
-    """Return (left, right) columns. When closed, right is eliminated so content spans full width."""
-    if opened:
-        return st.columns([0.68, 0.32], vertical_alignment="top")
-    else:
-        # A single full-width column on the left and a minimal placeholder on the right
-        left = st.container()
-        right = st.container()  # unused placeholder so caller can still 'with right:'
-        return left, right
-
-def _open_drawer(scope: str, triage_label: str = "", dispo_label: str = ""):
-    st.session_state["why_open"] = True
-    st.session_state["why_scope"] = scope
-    if triage_label: st.session_state["why_triage_label"] = triage_label
-    if dispo_label:  st.session_state["why_dispo_label"]  = dispo_label
-
-def _close_drawer():
-    st.session_state["why_open"] = False
-
-# ── Safe utils import (optional)
-def _no_op(*a, **k): return None
-try:
-    from utils import init_state as _init_state, enter_page as _enter_page, show_back_top_right as _show_back, render_sidebar as _render_sidebar
-except Exception:
-    _init_state = _no_op; _enter_page = _no_op; _show_back = _no_op; _render_sidebar = _no_op
-
-from components.patient_view import (
-    make_patient_from_row, compute_summary,
-    triage_level_from_summary, disposition_from_summary,
-)
-
-# ── Demo data
-FIXED_PROFILES = {
-    "CP-1000": {"MRN":"CP-1000","Patient":"Weber, Charlotte","Age":27,"Sex":"Female","ESI":2,
-                "HR":78,"SBP":164,"SpO₂":96,"TempC":37.0,"ECG":"Normal","hs-cTn (ng/L)":None,
-                "OnsetMin":90,"CC":"Chest pain at rest, mild SOB.","Arrival":"10:39"},
-    "CP-1001": {"MRN":"CP-1001","Patient":"Green, Gary","Age":59,"Sex":"Male","ESI":3,
-                "HR":102,"SBP":138,"SpO₂":95,"TempC":37.0,"ECG":"Borderline","hs-cTn (ng/L)":0.03,
-                "OnsetMin":60,"CC":"Intermittent chest tightness with exertion.","Arrival":"11:07"},
-}
-
-# ── Drawer state
-st.session_state.setdefault("why_open", False)
-st.session_state.setdefault("why_scope", "triage")
-st.session_state.setdefault("why_triage_label", "")
-st.session_state.setdefault("why_dispo_label", "")
-
-TRIAGE_LEVELS = {
-    "T1": ("Immediate",     "Highest probability for intensive care, emergency procedure, or mortality.", "#DC2626"),
-    "T2": ("Very Urgent",   "Elevated probability for intensive care, emergency procedure, or mortality.", "#F97316"),
-    "T3": ("Urgent",        "Moderate probability of hospital admission or very low probability of intensive care, emergency procedure, or mortality.", "#F59E0B"),
-    "T4": ("Less Urgent",   "Low probability of hospital admission.", "#22C55E"),
-    "T5": ("Non-Urgent",    "Fast turnaround and low probability of hospital admission.", "#10B981"),
-}
-DISP_LEVELS = {
-    "Confirm/Admit":  "Admit or confirm acute management plan — likely inpatient treatment.",
-    "Observe":        "Monitor in observation unit — reassess after a short period.",
-    "Consult":        "Seek specialist input before final decision.",
-    "Defer/Discharge":"Safe for discharge — provide safety-net and follow-up.",
-}
-
-def _chip(text, bg="#3B82F6"):
-    return f"<span style='border-radius:999px;padding:.25rem .6rem;background:{bg};color:#fff;margin-right:.35rem;margin-bottom:.35rem;display:inline-block;font-weight:600'>{escape(text)}</span>"
-
-def _pill(text, tone="#2563EB", inverse=False):
-    return (
-        "<span style='border-radius:999px;padding:.25rem .6rem;border:1px solid {tone};"
-        "margin:.15rem .25rem .15rem 0;display:inline-block;"
-        "background:{bg};color:{fg};font-weight:700'>{t}</span>"
-    ).format(tone=tone, bg=(tone if inverse else "transparent"), fg=("white" if inverse else tone), t=text)
-
-def patient_header(name: str, mrn: str, ui: dict) -> None:
-    left, right = st.columns([0.70, 0.30], vertical_alignment="center")
-    with left:
-        st.markdown(f"## {name}")
-        st.caption(f"MRN: {mrn}")
-    with right:
-        st.radio("View", ["Patient", "Clinicians"], horizontal=True, index=1, label_visibility="collapsed")
-
-def render_dispo_list(ai_dispo: str):
-    for k, desc in DISP_LEVELS.items():
-        is_ai = (k == ai_dispo)
-        st.markdown(
-            f"""
-            <div style="border:1px solid {'#3B82F6' if is_ai else '#e5e7eb'};border-radius:10px;padding:10px 12px;margin:.35rem 0;
-                        background:{'#EEF2FF' if is_ai else 'white'};display:flex;gap:.6rem;align-items:flex-start">
-              <div style="min-width:120px;font-weight:700">{escape(k)}</div>
-              <div style="color:#374151">{escape(desc)}</div>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+# ── Page renderer ──────────────────────────────────────────────────────────────────────────────────────
 
 def render_patient_chart():
     _init_state(); _enter_page("Patient Chart"); _render_sidebar(__file__); _show_back("← Back")
@@ -510,6 +455,8 @@ def render_patient_chart():
         if "PatientID" in tmp.columns: tmp["PatientID"] = tmp["PatientID"].astype(str)
         if "Patient" in tmp.columns:   tmp["Patient"]   = tmp["Patient"].astype(str).fillna("—")
         tmp = tmp[tmp["PatientID"].notna() & (tmp["PatientID"] != "None")]
+        # Only allow our three canonical profiles in chart
+        tmp = tmp[tmp["PatientID"].isin(list(FIXED_PROFILES.keys()))]
         for _, r in tmp.iterrows():
             pid = str(r["PatientID"]); nm = str(r.get("Patient","—"))
             options.append(f"{pid} — {nm}"); ids.append(pid)
@@ -527,12 +474,15 @@ def render_patient_chart():
     sel_id = sel_label.split(" — ")[0].strip()
     st.session_state["selected_patient_id"] = sel_id
 
-    # Build patient
-    if track_df is not None and not track_df.empty:
-        row = track_df.loc[track_df["PatientID"] == sel_id]
-        if row.empty: row = track_df.iloc[[0]]
-        patient = make_patient_from_row(row.iloc[0].to_dict())
-        name = str(row.iloc[0].get("Patient","—"))
+    # Build patient dict
+    if track_df is not None and not track_df.empty and sel_id in track_df["PatientID"].values:
+        row = track_df.loc[track_df["PatientID"] == sel_id].iloc[0].to_dict()
+        base = FIXED_PROFILES.get(sel_id, {})
+        # Prefer interview-friendly seeds for Arrival/CC if present
+        row.setdefault("Arrival", base.get("Arrival","—"))
+        row.setdefault("CC", base.get("CC","Chest pain."))
+        patient = make_patient_from_row(row)
+        name = str(row.get("Patient","—"))
     else:
         base = dict(FIXED_PROFILES.get(sel_id, next(iter(FIXED_PROFILES.values()))))
         name = base.get("Patient","—")
@@ -547,21 +497,21 @@ def render_patient_chart():
             "TempC": base.get("TempC", 37.0),
         })
 
-    # Prepare UI dict
+    # Prepare simple UI dict
     ui = {
         "Patient": name, "Age": patient["age"], "Sex": patient["sex"],
         "OnsetMin": patient["data_quality"]["time_from_onset_min"],
         "Arrival": patient["arrival_mode"], "CC": patient["chief_complaint"],
         "HR": patient["vitals"]["HR"], "SBP": patient["vitals"]["BP"].split("/")[0],
         "SpO₂": patient["vitals"]["SpO2"], "TempC": f"{patient['vitals'].get('TempC', 37.0):.1f}",
-        "ECG": "Normal" if not patient["risk_inputs"]["ecg_abnormal"] else "Abnormal",
+        "ECG": "Normal" if not patient["risk_inputs"]["ecg_abnormal"] else (base.get("ECG","Abnormal") if isinstance(base, dict) else "Abnormal"),
         "hs-cTn (ng/L)": patient["risk_inputs"].get("troponin"),
     }
 
     # Header + basic info
     patient_header(name, patient["mrn"], ui)
 
-    # Shared UI styles (labels, muted text, line, badge)
+    # Shared UI styles
     st.markdown("""
     <style>
       .ua-infocard{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:10px;padding:10px 12px;margin-top:.25rem}
@@ -618,7 +568,7 @@ def render_patient_chart():
     # ============ AI SECTION ============
     st.markdown("### AI Recommendations")
 
-    # ----- TRIAGE (now a 2-column wrapper so the panel starts at the very top) -----
+    # ----- TRIAGE -----
     tri_open = bool(st.session_state.get("why_open") and st.session_state.get("why_scope")=="triage")
     left_col, right_col = _drawer_cols(tri_open)
     with left_col:
@@ -719,7 +669,6 @@ def render_patient_chart():
         s1, s2 = st.columns([0.86, 0.14])
         with s1:
             st.markdown("**AI Next-Steps Suggestions**")
-            # Grey explanatory line (checkbox meaning)
             st.caption("Check a box to indicate you agree/accept that AI suggestion. Unchecked = not accepted.")
         with s2:
             st.button("❓", key="why_steps_btn",
@@ -739,13 +688,11 @@ def render_patient_chart():
 
         st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
 
-        # Notes instructions
         notes_ph = (
             "If you disagree with the AI triage or disposition recommendation, please explain your rationale here. "
             "If additional next steps are needed, list them here."
         )
         st.text_area("Notes (optional)", placeholder=notes_ph, height=160, key="clin_notes")
-
         st.button("Save", type="primary", key="save_btn")
     with right_col:
         _render_uncertainty_panel("steps")
