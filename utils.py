@@ -15,7 +15,6 @@ NAV_PAGES = [
     ("pages/4_Visits_and_Complaints.py", "folder2",       "Visits & Complaints"),
     ("pages/5_Clinical_Decision_Log.py", "clipboard-check",       "Clinical Decision Log"),
     ("pages/6_Audit_Log.py",             "clock-history", "Audit Log"),
-    ("pages/7_ED_Place_Holder.py",       "journal-text",  "ED Place Holder"),
 ]
 
 # 2) 路由查找用的「字典」 label -> path
@@ -27,7 +26,6 @@ PAGE_ROUTES = {
     "Visits & Complaints": "pages/4_Visits_and_Complaints.py",
     "Clinical Decision Log": "pages/5_Clinical_Decision_Log.py",
     "Audit Log": "pages/6_Audit_Log.py",
-    "ED Place holder": "pages/7_ED_Place_Holder.py",
 }
 
 # --------- 状态 & 通用组件 --------- #

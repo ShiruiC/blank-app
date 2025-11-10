@@ -1,13 +1,10 @@
 # components/patient_view.py
 # Utilities for building patient objects and UI-friendly summaries.
-# This keeps the original layout helpers, AND adds a simple "Approach B" summary
-# that maps a manual base risk (%) + stability label (High/Medium/Low)
-# to an interval (lo/hi) and confidence — purely for display.
 
 import math
+from html import escape
 
 def toy_risk_model(inputs: dict) -> float:
-    """(Kept for compatibility) A toy logistic risk model. Not used in Approach B."""
     score = 0.0
     score += 0.015 * (inputs["age"] - 40)
     score += 0.15 if inputs["sex"] == 1 else 0.0
@@ -24,7 +21,6 @@ def toy_risk_model(inputs: dict) -> float:
     return float(min(0.98, max(0.01, risk)))
 
 def widen_interval(base_risk: float, data_quality: dict):
-    """(Kept for compatibility) Interval widening by data quality. Not used in Approach B."""
     width = 0.08
     width += 0.07 * len(data_quality.get("missing", []))
     width += 0.08 if data_quality.get("ood") else 0.0
@@ -58,7 +54,6 @@ def drivers_from_inputs(p: dict):
     return d or ["All vitals & ECG reassuring"]
 
 def next_steps_plan(base: float, width: float, critical: bool):
-    """Simple, UI-level suggested steps based on base risk + interval width."""
     steps = []
     if base >= 0.40 or critical:
         steps += [
@@ -82,7 +77,6 @@ def next_steps_plan(base: float, width: float, critical: bool):
     return steps
 
 def make_patient_from_row(row: dict):
-    """Normalize a track-board row dict into a patient dict used by the chart UI."""
     def _get(k, default=None):
         v = row.get(k, default)
         return default if v in [None, ""] else v
@@ -112,7 +106,6 @@ def make_patient_from_row(row: dict):
             "RR": int(_get("RR", 18)),
             "SpO2": int(_get("SpO₂", _get("SpO2", 96))),
             "TempC": float(_get("TempC", 37.0)),
-            "TempF": float(_get("TempF", 98.6)),
         },
         "risk_inputs": {
             "age": age,
@@ -132,7 +125,6 @@ def make_patient_from_row(row: dict):
     }
 
 def compute_summary(p: dict):
-    """(Kept for compatibility) Original path using toy model + widen_interval."""
     base = toy_risk_model(p["risk_inputs"])
     lo, hi, (conf_txt, conf_dot) = widen_interval(base, p["data_quality"])
     width = hi - lo
@@ -166,27 +158,18 @@ def disposition_from_summary(s: dict):
     if s["base"] >= 0.10: return "Consult"
     return "Defer/Discharge"
 
-# ---------- Approach B: UI-only mapping (NEW) ----------
+# ---------- Approach B (manual) ----------
 
 def width_from_stability_label(stab: str) -> int:
-    """Map stability label to interval width in points (0–100 scale)."""
     m = {"High": 6, "Medium": 18, "Low": 30}
     return m.get(str(stab).title(), 18)
 
 def confidence_from_width(width_pts: int) -> str:
-    """Confidence category derived from interval width."""
     if width_pts <= 6: return "High"
     if width_pts <= 12: return "Medium"
     return "Low"
 
 def simple_summary_from_manual(base_pct: float, stability_label: str, patient: dict):
-    """
-    Summary for display only:
-      - base_pct: manual risk point (0–100)
-      - stability_label: 'High'/'Medium'/'Low' → width points 6/18/30
-      - interval is centered on base and clipped to [0,100]
-      - confidence derives from width
-    """
     width_pts = width_from_stability_label(stability_label)
     lo = max(0.0, base_pct - width_pts / 2.0)
     hi = min(100.0, base_pct + width_pts / 2.0)
@@ -214,13 +197,7 @@ def simple_summary_from_manual(base_pct: float, stability_label: str, patient: d
         "suspected_condition": "ACS-like",
     }
 
-# ---------- Uncertainty helpers used by the drawers ----------
-
 def decompose_uncertainty(summary: dict, patient: dict):
-    """
-    Return (aleatoric_pct, epistemic_pct, conf_score_0_1, tier).
-    Uses interval width as the main driver for confidence; adds small signals for data quality.
-    """
     width = summary["width"]
     conf_score = max(0.0, min(1.0, 1.0 - (width / 0.35)))
     miss = len(patient["data_quality"].get("missing", []))

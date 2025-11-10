@@ -8,7 +8,7 @@ render_sidebar(current_file=__file__)
 reset_on_landing()
 
 
-header("EHR System", "Welcome to the ED decision-support workspace.")
+header("EHR System", "Welcome to the Emergency Department decision-support workspace.")
 
 colA, colB = st.columns(2)
 with colA:
