@@ -231,7 +231,6 @@ def _stability_details_block(scope: str, summary: dict, patient: dict):
     B_rows = _pick_band_rows(B_band, lo, hi, k_targets=3)
 
     # Guarantee we ALWAYS show values that match the header:
-    # If not enough in-band rows, fill with "band samples" (lower, ~1/3, ~2/3, upper).
     if len(A_rows) < 4:
         have = {(r.get("label") or r.get("name")) for r in A_rows}
         for s in _band_samples(lo, hi):
@@ -262,14 +261,14 @@ def _stability_details_block(scope: str, summary: dict, patient: dict):
                 unsafe_allow_html=True
             )
 
-        # A) Local sensitivity — extremes + mids guaranteed
+        # A) Local sensitivity
         _corner_badge("A")
         st.table({
             "Perturbation / Context": [r.get("label","") for r in A_rows],
             "Risk %": [_format_pct(r["risk"]) for r in A_rows],
         })
 
-        # B) Cross-model/Policy spread — extremes + mid guaranteed
+        # B) Cross-model/Policy spread
         _corner_badge("B")
         st.table({
             "Model": [r.get("name","") for r in B_rows],
@@ -333,59 +332,104 @@ def _plan_stability_block(summary: dict, patient: dict):
                 unsafe_allow_html=True
             )
 
-# ==============================================================================
-# Demo profiles & UI scaffolding
-# ==============================================================================
+# ── Patient-facing view (NEW) ─────────────────────────────────────────────────
+def _render_patient_friendly(summary: dict, patient: dict):
+    # status from disposition band
+    dispo = disposition_from_summary(summary)
+    band = band_from_risk(float(summary["base"]))
+    band_color = {"Low":"#10B981","Low-Moderate":"#22C55E","Moderate":"#F59E0B","High":"#DC2626"}.get(band, "#6b7280")
 
-FIXED_PROFILES = {
-    "CP-1000": {"MRN":"CP-1000","Patient":"Weber, Charlotte","Age":28,"Sex":"Female","ESI":2,
-                "HR":78,"SBP":128,"SpO₂":98,"TempC":36.9,"ECG":"Normal","hs-cTn (ng/L)":None,
-                "OnsetMin":140,"CC":"Typical chest pressure, now improved.","Arrival":"Ambulance"},
-    "CP-1001": {"MRN":"CP-1001","Patient":"Green, Gary","Age":60,"Sex":"Male","ESI":3,
-                "HR":96,"SBP":136,"SpO₂":96,"TempC":36.8,"ECG":"Nonspecific","hs-cTn (ng/L)":None,
-                "OnsetMin":40,"CC":"Not sure… feels weird in chest, comes and goes. Pain hard to describe.","Arrival":"Walk-in"},
-    "CP-1002": {"MRN":"CP-1002","Patient":"Lopez, Mariah","Age":44,"Sex":"Female","ESI":3,
-                "HR":94,"SBP":128,"SpO₂":98,"TempC":37.2,"ECG":"ST/T abn","hs-cTn (ng/L)":8.0,
-                "OnsetMin":25,"CC":"Acute chest tightness with diaphoresis during activity.","Arrival":"Ambulance"},
-}
+    # confidence ring (no heavy numbers, but clear tier + ring)
+    _, _, conf_score, conf_tier = decompose_uncertainty(summary, patient)
+    conf_pct = int(round(conf_score*100))
+    ring = max(8, min(92, conf_pct))
+    ring_css = f"""
+      background:
+        conic-gradient(#4b5563 {ring}%, #e5e7eb 0);
+    """
+    # patient-safe next steps (light simplification)
+    raw_steps = list(summary.get("steps") or [])
+    def _simplify(s: str) -> str:
+        t = s.lower()
+        t = t.replace("hs-troponin", "blood test").replace("troponin", "blood test")
+        t = t.replace("ecg", "heart trace (ECG)")
+        t = t.replace("rule-out", "check").replace("protocol", "plan")
+        t = t.replace("stat", "now")
+        t = t.replace("reassess", "check again")
+        return t.capitalize()
+    steps = [_simplify(s) for s in raw_steps][:4]
 
-SCENARIOS = {
-    "CP-1000": {"base_pct": 12, "stability": "High",   "cascade": 0.00},
-    "CP-1001": {"base_pct": 28, "stability": "Medium", "cascade": 0.05},
-    "CP-1002": {"base_pct": 33, "stability": "Low",    "cascade": 0.15},
-}
-st.session_state["_SCENARIOS"] = SCENARIOS
+    st.markdown("""
+    <style>
+      .pv-card{background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;padding:12px 14px;margin:.25rem 0}
+      .pv-row{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}
+      .pv-title{font-weight:900;font-size:18px}
+      .pv-pill{border-radius:999px;padding:.35rem .7rem;color:#fff;font-weight:800}
+      .pv-badge{border-radius:999px;padding:.25rem .6rem;border:1px solid #e5e7eb;background:#f9fafb;font-weight:800}
+      .pv-note{color:#6b7280;font-size:13px}
+      .pv-kv{display:grid;grid-template-columns:140px 1fr;row-gap:4px;column-gap:10px;font-size:14px}
+      .pv-dot{display:inline-block;width:10px;height:10px;border-radius:999px;margin-right:.4rem}
+      .pv-ring{width:80px;height:80px;border-radius:50%%;%s}
+      .pv-step{display:flex;align-items:flex-start;gap:.5rem;margin:.25rem 0}
+    </style>
+    """ % ring_css, unsafe_allow_html=True)
 
-st.session_state.setdefault("why_open", False)
-st.session_state.setdefault("why_scope", "triage")
-st.session_state.setdefault("why_triage_label", "")
-st.session_state.setdefault("why_dispo_label", "")
+    # Header: current status
+    st.markdown('<div class="pv-card">', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="pv-row">
+            <div class="pv-title">Your current status</div>
+            <span class="pv-pill" style="background:{band_color}">{escape(band)}</span>
+            <span class="pv-badge">{escape(dispo)}</span>
+        </div>
+        <div class="pv-note">This is a summary from your care team, assisted by a medical AI tool — your clinician makes the final decision.</div>
+        """,
+        unsafe_allow_html=True
+    )
 
-TRIAGE_LEVELS = {
-    "T1": ("Immediate","Highest probability for intensive care, emergency procedure, or mortality.", "#DC2626"),
-    "T2": ("Very Urgent","Elevated probability for intensive care, emergency procedure, or mortality.", "#F97316"),
-    "T3": ("Urgent","Moderate probability of hospital admission or very low probability of intensive care, emergency procedure, or mortality.", "#F59E0B"),
-    "T4": ("Less Urgent","Low probability of hospital admission.", "#22C55E"),
-    "T5": ("Non-Urgent","Fast turnaround and low probability of hospital admission.", "#10B981"),
-}
-DISP_LEVELS = {
-    "Confirm/Admit":"Admit or confirm acute management plan — likely inpatient treatment.",
-    "Observe":"Monitor in observation unit — reassess after a short period.",
-    "Consult":"Seek specialist input before final decision.",
-    "Defer/Discharge":"Safe for discharge — provide safety-net and follow-up.",
-}
+    # Confidence: visual ring + short text
+    st.markdown("<hr>", unsafe_allow_html=True)
+    c1, c2 = st.columns([0.22, 0.78])
+    with c1:
+        st.markdown('<div class="pv-ring"></div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"<div class='pv-title'>How sure is the system?</div>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div class='pv-row'><span class='pv-badge'>{escape(conf_tier)}</span>"
+            f"<span class='pv-note'>Higher ring fill means more certainty.</span></div>",
+            unsafe_allow_html=True
+        )
+        # Gentle explanation chips (no raw model jargon)
+        dq = patient.get("data_quality", {}) or {}
+        missing = dq.get("missing", []) or []
+        chips = []
+        if missing: chips.append("Some tests pending")
+        if dq.get("time_from_onset_min", 999) < 90: chips.append("Came in early — re-checks needed")
+        if dq.get("ood"): chips.append("Pattern a bit unusual — extra caution")
+        if not chips: chips.append("Results consistent so far")
+        st.markdown(" ".join([f"<span class='pv-badge'>{escape(x)}</span>" for x in chips]), unsafe_allow_html=True)
 
-def _pill(text, tone="#2563EB", inverse=False):
-    return (
-        "<span style='border-radius:999px;padding:.25rem .6rem;border:1px solid {tone};"
-        "margin:.15rem .25rem .15rem 0;display:inline-block;"
-        "background:{bg};color:{fg};font-weight:700'>{t}</span>"
-    ).format(tone=tone, bg=(tone if inverse else "transparent"), fg=("white" if inverse else tone), t=text)
+    # What happens next (action, not numbers)
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown("<div class='pv-title'>What happens next</div>", unsafe_allow_html=True)
+    for s in steps:
+        st.markdown(
+            f"<div class='pv-step'>"
+            f"<span class='pv-dot' style='background:#3b82f6'></span>"
+            f"<div>{escape(s)}</div>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
 
-def _chip(text, bg="#3B82F6"):
-    return f"<span style='border-radius:999px;padding:.25rem .6rem;background:{bg};color:#fff;margin-right:.35rem;margin-bottom:.35rem;display:inline-block;font-weight:600'>{escape(text)}</span>"
+    # Safety net text
+    st.markdown(
+        "<div class='pv-note'>If anything changes (new pain, dizziness, trouble breathing), tell the team right away.</div>",
+        unsafe_allow_html=True
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-# ── TRIAGE blocks ──────────────────────────────────────────────────────────────
+# ── TRIAGE blocks (clinician) ─────────────────────────────────────────────────
 def _render_triage_blocks(summary, patient):
     alea_pct, epis_pct, conf_score, conf_tier = decompose_uncertainty(summary, patient)
     conf_pct = int(round(conf_score*100))
@@ -612,7 +656,8 @@ def _render_uncertainty_panel(scope_here: str):
             st.caption("Higher bands push toward Confirm/Admit; lower bands favor Observe/Consult/Discharge.")
             tri_tag = st.session_state.get("why_triage_label","")
             if tri_tag:
-                st.markdown(f"**Triage context:** {_pill(tri_tag.split('—')[0].strip(), tone='#64748b', inverse=False)} {escape(tri_tag)}", unsafe_allow_html=True)
+                st.markdown(f"**Triage context:** <span style='border-radius:999px;padding:.25rem .6rem;border:1px solid #64748b;color:#64748b;font-weight:700'>"
+                            f"{escape(tri_tag.split('—')[0].strip())}</span> {escape(tri_tag)}", unsafe_allow_html=True)
 
             chips = []
             ri = dict(patient.get("risk_inputs", {}))
@@ -693,7 +738,7 @@ def _render_uncertainty_panel(scope_here: str):
             _stability_details_block("disposition", summary, patient)
 
         else:
-            # === NEXT-STEPS drawer: classic "chips + badges" + confidence block ===
+            # === NEXT-STEPS drawer ===
             st.subheader("Evidence / Reasoning")
             st.caption("Goal: Balance immediate care with uncertainty reduction first.")
 
@@ -704,7 +749,6 @@ def _render_uncertainty_panel(scope_here: str):
                 "Reassess chest pain in 1–2 h",
             ])
 
-            # pill + small tag badge (matches your “second” screenshot)
             for s in ai_steps:
                 is_ur = any(k in s.lower() for k in ["obtain", "repeat", "rule-out", "prioritize", "complete"])
                 tag   = "Uncertainty-reduction" if is_ur else "Care step"
@@ -732,15 +776,9 @@ def _render_uncertainty_panel(scope_here: str):
             cc_txt = (patient.get("chief_complaint") or "")
             narrative_clear = len(cc_txt) >= 12
 
-            # start from triage confidence, then adjust for plan sensitivity & missing data
             _, _, tri_conf_score, _ = decompose_uncertainty(summary, patient)
-            plan_sensitivity = max(0.0, (width - 0.08) / 0.22)          # 0..~1
-            steps_conf_score = max(
-                0.0,
-                tri_conf_score
-                - min(0.10, 0.10 * plan_sensitivity)                    # up to −10 pts if plan is sensitive
-                - (0.05 if missing else 0.0)                             # −5 pts if key items missing
-            )
+            plan_sensitivity = max(0.0, (width - 0.08) / 0.22)
+            steps_conf_score = max(0.0, tri_conf_score - min(0.10, 0.10 * plan_sensitivity) - (0.05 if missing else 0.0))
             steps_conf_pct = int(round(100 * steps_conf_score))
             steps_tier = "High" if steps_conf_score >= 0.70 else ("Medium" if steps_conf_score >= 0.40 else "Low")
             pill_bg = {"High":"#16a34a","Medium":"#f59e0b","Low":"#f97316"}[steps_tier]
@@ -758,20 +796,17 @@ def _render_uncertainty_panel(scope_here: str):
             )
             st.caption("How confident is the AI in the next-steps plan?")
 
-            # pie weights
             w_data  = min(1.0, 0.60 * len(missing))
             w_fam   = 0.30 * (1.0 if ood else 0.0)
-            w_stab  = max(0.0, (width - 0.08) / 0.22)                    # plan sensitivity
+            w_stab  = max(0.0, (width - 0.08) / 0.22)
             w_human = 0.25 * (0.0 if narrative_clear else 1.0)
-            w_chain = 0.10                                              # weak link to upstream decisions
+            w_chain = 0.10
 
             raw   = [w_data, w_fam, w_stab, w_human, w_chain]
             total = sum(raw) or 1.0
             pct5  = [int(round(100 * x / total)) for x in raw]
-            # fix rounding
             pct5[0] += (100 - sum(pct5))
 
-            # simple conic "pie"
             start2 = pct5[0]; start3 = start2 + pct5[1]; start4 = start3 + pct5[2]; start5 = start4 + pct5[3]
             pie_css = (
                 f"background: conic-gradient(#f59e0b 0 {pct5[0]}%, "
@@ -802,12 +837,31 @@ def _render_uncertainty_panel(scope_here: str):
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-# ── Page renderer (unchanged) ──────────────────────────────────────────────────
+# ── Page renderer ──────────────────────────────────────────────────────────────
 def render_patient_chart():
     _init_state(); _enter_page("Patient Chart"); _render_sidebar(__file__); _show_back("← Back")
 
     st.session_state.setdefault("selected_patient_id", "CP-1000")
     st.caption("Search / select a patient (type ID or name to filter)")
+
+    # Profiles (unchanged)
+    FIXED_PROFILES = {
+        "CP-1000": {"MRN":"CP-1000","Patient":"Weber, Charlotte","Age":28,"Sex":"Female","ESI":2,
+                    "HR":78,"SBP":128,"SpO₂":98,"TempC":36.9,"ECG":"Normal","hs-cTn (ng/L)":None,
+                    "OnsetMin":140,"CC":"Typical chest pressure, now improved.","Arrival":"Ambulance"},
+        "CP-1001": {"MRN":"CP-1001","Patient":"Green, Gary","Age":60,"Sex":"Male","ESI":3,
+                    "HR":96,"SBP":136,"SpO₂":96,"TempC":36.8,"ECG":"Nonspecific","hs-cTn (ng/L)":None,
+                    "OnsetMin":40,"CC":"Not sure… feels weird in chest, comes and goes. Pain hard to describe.","Arrival":"Walk-in"},
+        "CP-1002": {"MRN":"CP-1002","Patient":"Lopez, Mariah","Age":44,"Sex":"Female","ESI":3,
+                    "HR":94,"SBP":128,"SpO₂":98,"TempC":37.2,"ECG":"ST/T abn","hs-cTn (ng/L)":8.0,
+                    "OnsetMin":25,"CC":"Acute chest tightness with diaphoresis during activity.","Arrival":"Ambulance"},
+    }
+    SCENARIOS = {
+        "CP-1000": {"base_pct": 12, "stability": "High",   "cascade": 0.00},
+        "CP-1001": {"base_pct": 28, "stability": "Medium", "cascade": 0.05},
+        "CP-1002": {"base_pct": 33, "stability": "Low",    "cascade": 0.15},
+    }
+    st.session_state["_SCENARIOS"] = SCENARIOS
 
     options, ids = [], []
     for pid, d in FIXED_PROFILES.items():
@@ -844,7 +898,7 @@ def render_patient_chart():
         st.markdown(f"## {name}")
         st.caption(f"MRN: {patient['mrn']}")
     with right:
-        st.radio("View", ["Patient", "Clinicians"], horizontal=True, index=1, label_visibility="collapsed")
+        view_mode = st.radio("View", ["Patient", "Clinicians"], horizontal=True, index=1, label_visibility="collapsed")
 
     st.markdown("""
     <style>
@@ -876,6 +930,7 @@ def render_patient_chart():
         unsafe_allow_html=True
     )
 
+    # Tabs (still available for both views — keeps vitals visible)
     tabs = st.tabs(["Current", "History", "Results"])
     with tabs[0]:
         c1,c2,c3,c4 = st.columns(4)
@@ -887,11 +942,18 @@ def render_patient_chart():
     with tabs[1]: st.caption("No prior ED visits in this demo.")
     with tabs[2]: st.caption("No additional labs/imaging in this demo.")
 
+    # Compute summary (unchanged)
     manual = simple_summary_from_manual(scen.get("base_pct", 25), scen.get("stability", "Medium"), patient)
     summary = manual
     st.session_state["_ua_summary"] = summary
     st.session_state["_ua_patient"] = patient
 
+    # If PATIENT view → show patient-friendly panel and RETURN early
+    if view_mode == "Patient":
+        _render_patient_friendly(summary, patient)
+        return
+
+    # ========== Clinician view below (unchanged flow) ==========
     tri = triage_level_from_summary(summary)
     t_code, t_label, t_desc = tri["code"], tri["label"], tri["desc"]
     color_map = {"T1":"#DC2626","T2":"#F97316","T3":"#F59E0B","T4":"#22C55E","T5":"#10B981"}
@@ -910,7 +972,8 @@ def render_patient_chart():
                 f"""
                 <div class="ua-line">
                 <span class="ua-label">AI Triage Recommendation:</span>
-                {_pill(t_code, tone=t_color, inverse=True)}
+                <span style='border-radius:999px;padding:.25rem .6rem;border:1px solid {t_color};
+                             background:{t_color};color:white;font-weight:700'>{escape(t_code)}</span>
                 <div><b>{escape(t_label)}</b><br><span class="ua-muted">{escape(t_desc)}</span></div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -921,7 +984,11 @@ def render_patient_chart():
 
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
         for k in ["T1","T2","T3","T4","T5"]:
-            lab, desc, colhex = TRIAGE_LEVELS[k]
+            lab, desc, colhex = {"T1":("Immediate","Highest probability for intensive care, emergency procedure, or mortality.", "#DC2626"),
+                                 "T2":("Very Urgent","Elevated probability for intensive care, emergency procedure, or mortality.", "#F97316"),
+                                 "T3":("Urgent","Moderate probability of hospital admission or very low probability of intensive care, emergency procedure, or mortality.", "#F59E0B"),
+                                 "T4":("Less Urgent","Low probability of hospital admission.", "#22C55E"),
+                                 "T5":("Non-Urgent","Fast turnaround and low probability of hospital admission.", "#10B981")}[k]
             is_ai = (k == t_code)
             st.markdown(
                 f"""
@@ -929,7 +996,8 @@ def render_patient_chart():
                             border:1px solid {'#3B82F6' if is_ai else '#e5e7eb'};
                             background:{'#EEF2FF' if is_ai else 'white'};
                             border-radius:10px;padding:10px 12px;">
-                  <div style="margin-top:1px">{_pill(k, tone=colhex, inverse=True)}</div>
+                  <div style="margin-top:1px"><span style='border-radius:999px;padding:.25rem .6rem;border:1px solid {colhex};
+                             background:{colhex};color:white;font-weight:700'>{escape(k)}</span></div>
                   <div style="flex:1">
                     <b>{escape(lab)}</b><br>
                     <span style='color:#6b7280;font-size:13px'>{escape(desc)}</span>
@@ -964,7 +1032,10 @@ def render_patient_chart():
                 <div class="ua-line">
                 <span class="ua-label">AI Disposition Recommendation:</span>
                 <span class="ua-badge">{escape(disp_default)}</span>
-                <span class="ua-muted">{escape(DISP_LEVELS[disp_default])}</span>
+                <span class="ua-muted">{escape({'Confirm/Admit':'Admit or confirm acute management plan — likely inpatient treatment.',
+                                                'Observe':'Monitor in observation unit — reassess after a short period.',
+                                                'Consult':'Seek specialist input before final decision.',
+                                                'Defer/Discharge':'Safe for discharge — provide safety-net and follow-up.'}[disp_default])}</span>
                 </div>
                 """, unsafe_allow_html=True)
         with dright:
@@ -972,7 +1043,10 @@ def render_patient_chart():
                       help="How confident is the AI disposition recommendation?",
                       on_click=_open_drawer, args=("disposition","",str(disp_default)))
 
-        for k, desc in DISP_LEVELS.items():
+        for k, desc in {'Confirm/Admit':"Admit or confirm acute management plan — likely inpatient treatment.",
+                        'Observe':"Monitor in observation unit — reassess after a short period.",
+                        'Consult':"Seek specialist input before final decision.",
+                        'Defer/Discharge':"Safe for discharge — provide safety-net and follow-up."}.items():
             is_ai = (k == disp_default)
             st.markdown(
                 f"""
@@ -988,7 +1062,7 @@ def render_patient_chart():
         lcdl, lcdr = st.columns([0.18, 0.82], vertical_alignment="center")
         with lcdl: st.markdown("<div class='ua-label'>Clinician Disposition</div>", unsafe_allow_html=True)
         with lcdr:
-            disp_opts = list(DISP_LEVELS.keys())
+            disp_opts = ['Confirm/Admit','Observe','Consult','Defer/Discharge']
             try:
                 st.segmented_control("disp_final", disp_opts, selection_mode="single",
                                      default=disp_default, label="", label_visibility="collapsed")
@@ -999,7 +1073,7 @@ def render_patient_chart():
     with right_col:
         _render_uncertainty_panel("disposition")
 
-    # NEXT STEPS (unchanged per your request)
+    # NEXT STEPS (unchanged)
     st.markdown('</div>', unsafe_allow_html=True)
     steps_open = bool(st.session_state.get("why_open") and st.session_state.get("why_scope")=="steps")
     left_col, right_col = _drawer_cols(steps_open)
@@ -1022,7 +1096,7 @@ def render_patient_chart():
         for i, step in enumerate(ai_steps):
             c = st.columns([0.06, 0.94])
             with c[0]: st.checkbox("", key=f"agree_step_{i}")
-            with c[1]: st.markdown(_chip(step), unsafe_allow_html=True)
+            with c[1]: st.markdown(f"<span style='border-radius:999px;padding:.25rem .6rem;background:#3B82F6;color:#fff;margin-right:.35rem;margin-bottom:.35rem;display:inline-block;font-weight:600'>{escape(step)}</span>", unsafe_allow_html=True)
 
         st.markdown("<div style='height:.5rem'></div>", unsafe_allow_html=True)
         notes_ph = ("If you disagree with the AI triage or disposition recommendation, please explain your rationale here. "
