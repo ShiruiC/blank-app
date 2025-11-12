@@ -55,7 +55,6 @@ def _tier_from_conf(score: float) -> str:
     return "High" if score > 0.75 else ("Medium" if score >= 0.40 else "Low")
 
 _TARGET_CONF = {
-    # tri, dispo, steps
     "CP-1000": {"tri":0.86, "dispo":0.81, "steps":0.76},
     "CP-1001": {"tri":0.58, "dispo":0.52, "steps":0.39},
     "CP-1002": {"tri":0.39, "dispo":0.34, "steps":0.28},
@@ -86,15 +85,12 @@ def _triage_from_base(base: float):
         return {"code": "T4", "label": "Less Urgent", "desc": "Low probability of hospital admission."}
     return {"code": "T5", "label": "Non-Urgent", "desc": "Fast turnaround and low probability of hospital admission."}
 
-# ── Stability / interval detail rows (unchanged core logic) ────────────────────
+# ── Stability / interval detail rows ───────────────────────────────────────────
 def _triage_input_perturbations(patient, summary):
-    target_lo, target_hi = float(summary["lo"]), float(summary["hi"])
     base_inputs = _copy_inputs(patient)
     rows = []
     def _try(label, v):
-        r = toy_risk_model(v)
-        if target_lo - 1e-6 <= r <= target_hi + 1e-6:
-            rows.append({"label": label, "risk": r})
+        r = toy_risk_model(v); rows.append({"label": label, "risk": r})
     tro = base_inputs.get("troponin")
     if tro is not None:
         for d in [-0.004, -0.002, +0.002, +0.004]:
@@ -104,7 +100,7 @@ def _triage_input_perturbations(patient, summary):
         for t_guess, lab in [(0.006, "low guess"), (0.012, "borderline"), (0.016, "mild positive")]:
             v = _copy_inputs(patient); v["troponin"] = t_guess
             _try(f"hs-cTn {lab} ({t_guess:.3f} ng/L)", v)
-    v = _copy_inputs(patient); v["ecg_abnormal"] = not v["ecg_abnormal"]; _try("ECG re-read", v)
+    v = _copy_inputs(patient); v["ecg_abnormal"] = not v["ecg_abnormal"]; _try("ECG re-read (toggle)", v)
     for pf, label in [("radiating", "Add radiating"), ("crushing", "Add crushing")]:
         v = _copy_inputs(patient); s = set(v["pain_features"]); s.add(pf); v["pain_features"] = list(s)
         _try(label, v)
@@ -112,13 +108,11 @@ def _triage_input_perturbations(patient, summary):
 
 def _triage_model_members(summary):
     base, lo, hi = float(summary["base"]), float(summary["lo"]), float(summary["hi"])
-    m1 = _clip01(min(hi, max(lo, base - 0.01)))
-    m2 = _clip01(min(hi, max(lo, base + 0.01)))
-    return [("XGBoost (proxy)", m1), ("Neural (proxy)", m2)]
+    m1 = _clip01(base - 0.01); m2 = _clip01(base + 0.01)
+    return [("Triage XGBoost (proxy)", m1), ("Triage Neural (proxy)", m2)]
 
 def _disposition_threshold(patient) -> float:
-    ri = patient.get("risk_inputs", {})
-    thr = 0.22
+    ri = patient.get("risk_inputs", {}); thr = 0.22
     if ri.get("ecg_abnormal"): thr -= 0.02
     tro = ri.get("troponin")
     if (isinstance(tro, (int, float)) and tro is not None):
@@ -127,18 +121,15 @@ def _disposition_threshold(patient) -> float:
     return max(0.12, thr)
 
 def _dispo_prob_from_triage(triage_risk: float, patient) -> float:
-    k = 10.0
-    thr = _disposition_threshold(patient)
+    k = 10.0; thr = _disposition_threshold(patient)
     return _sigmoid(k * (triage_risk - thr))
 
 def _dispo_input_perturbations(patient, summary):
     A = []
     base_tri = float(summary["base"])
-    lo, hi = float(summary["lo"]), float(summary["hi"])
     def _try(label, tri_r):
         disp_r = _dispo_prob_from_triage(_clip01(tri_r), patient)
-        if lo - 1e-6 <= disp_r <= hi + 1e-6:
-            A.append({"label": label, "risk": disp_r})
+        A.append({"label": label, "risk": disp_r})
     for dpts in [-0.03, -0.015, +0.015, +0.03]:
         _try(f"Triage risk {('−' if dpts<0 else '+')}{abs(int(round(dpts*100)))} pts", base_tri + dpts)
     ri = patient.get("risk_inputs", {})
@@ -154,17 +145,14 @@ def _dispo_input_perturbations(patient, summary):
 def _disposition_model_members(summary, patient):
     base_tri = float(summary["base"])
     base_disp = _dispo_prob_from_triage(base_tri, patient)
-    lo, hi = float(summary["lo"]), float(summary["hi"])
-    m1 = _clip01(min(hi, max(lo, base_disp - 0.01)))
-    m2 = _clip01(min(hi, max(lo, base_disp + 0.01)))
-    return [("Policy B (proxy)", m1), ("Policy C (proxy)", m2)]
+    m1 = _clip01(base_disp - 0.01); m2 = _clip01(base_disp + 0.01)
+    return [("Disposition policy B (proxy)", m1), ("Disposition policy C (proxy)", m2)]
 
-def _pick_band_rows(rows, lo: float, hi: float, k_targets=4):
+def _nearest_k(rows, targets, k):
+    """Pick at most k rows whose risks are nearest to the provided targets (no band fallbacks)."""
     if not rows: return []
     rows = sorted(rows, key=lambda r: r["risk"])
-    targets = [lo, lo + (hi-lo)/3, lo + 2*(hi-lo)/3, hi][:k_targets]
-    picked = []
-    used = set()
+    picked, used = [], set()
     def _nearest(target):
         bi, br = None, None
         for i, r in enumerate(rows):
@@ -176,45 +164,97 @@ def _pick_band_rows(rows, lo: float, hi: float, k_targets=4):
         i, r = _nearest(t)
         if r is not None:
             used.add(i); picked.append(r)
-    return sorted(picked, key=lambda r: r["risk"])
+    return picked
 
-def _band_samples(lo, hi):
-    return [
-        {"label": "Band sample — lower edge", "name": "Band sample — lower edge", "risk": lo},
-        {"label": "Band sample — ~1/3",       "name": "Band sample — ~1/3",       "risk": lo + (hi-lo)/3},
-        {"label": "Band sample — ~2/3",       "name": "Band sample — ~2/3",       "risk": lo + 2*(hi-lo)/3},
-        {"label": "Band sample — upper edge", "name": "Band sample — upper edge", "risk": hi},
-    ]
-
-def _stability_table(scope, summary, patient):
+# ── Merge BOTH layers into two tables total (A: input changes; B: model/policy)
+#    Force rows to be inside the current risk interval and show exact position.
+def _stability_tables_overall(summary, patient):
     lo, hi = float(summary["lo"]), float(summary["hi"])
-    if scope == "triage":
-        A_all = _triage_input_perturbations(patient, summary)
-        B_all = [{"name": n, "risk": r} for (n, r) in _triage_model_members(summary)]
-    else:
-        A_all = _dispo_input_perturbations(patient, summary)
-        B_all = [{"name": n, "risk": r} for (n, r) in _disposition_model_members(summary, patient)]
-    A_rows = _pick_band_rows([r for r in A_all if lo-0.015 <= r["risk"] <= hi+0.015], lo, hi, 4)
-    B_rows = _pick_band_rows([r for r in B_all if lo-0.015 <= r["risk"] <= hi+0.015], lo, hi, 3)
-    if len(A_rows) < 4:
-        have = {(r.get("label") or r.get("name")) for r in A_rows}
-        for s in _band_samples(lo, hi):
-            if (s["label"] not in have) and len(A_rows) < 4:
-                A_rows.append(s); have.add(s["label"])
-        A_rows = sorted(A_rows, key=lambda r: r["risk"])
-    if len(B_rows) < 3:
-        have = {(r.get("label") or r.get("name")) for r in B_rows}
-        for s in _band_samples(lo, hi):
-            if (s["name"] not in have) and len(B_rows) < 3:
-                B_rows.append(s); have.add(s["name"])
-        B_rows = sorted(B_rows, key=lambda r: r["risk"])
-    with st.container(border=True):
-        st.table({"Perturbation / Context":[r.get("label","") for r in A_rows],
-                  "Risk %":[_format_pct(r["risk"]) for r in A_rows]})
-        st.table({"Model/Policy":[r.get("name","") for r in B_rows],
-                  "Risk %":[_format_pct(r["risk"]) for r in B_rows]})
+    width = max(1e-6, hi - lo)
+    targets = [lo, lo + (width/3), lo + 2*(width/3), hi]
 
-# ── Unified uncertainty panel (callable in-place; no triage/dispo repeats) ─────
+    def _clip_to_band(x: float) -> float:
+        return max(lo, min(hi, float(x)))
+
+    def _pos_in_band(x: float) -> str:
+        pct = int(round(100.0 * (x - lo) / width))
+        if pct <= 2: where = "low"
+        elif pct >= 98: where = "high"
+        elif pct < 50: where = "lower-mid"
+        elif pct > 50: where = "upper-mid"
+        else: where = "mid"
+        return f"{pct}% of band · {where}"
+
+    tri_A = _triage_input_perturbations(patient, summary)
+    disp_A = _dispo_input_perturbations(patient, summary)
+    A_all = [{"label": f"[Triage] {r['label']}", "risk": r["risk"]} for r in tri_A] + \
+            [{"label": f"[Disposition] {r['label']}", "risk": r["risk"]} for r in disp_A]
+
+    A_rows = []
+    for t in targets:
+        if not A_all: break
+        i_best = min(range(len(A_all)), key=lambda i: abs(float(A_all[i]["risk"]) - t))
+        r = A_all.pop(i_best)
+        r_clipped = _clip_to_band(r["risk"])
+        A_rows.append({"label": r["label"], "risk": r_clipped, "pos": _pos_in_band(r_clipped)})
+
+    tri_B = [{"name": n, "risk": r} for (n, r) in _triage_model_members(summary)]
+    disp_B = [{"name": n, "risk": r} for (n, r) in _disposition_model_members(summary, patient)]
+    B_all = [{"name": f"[Triage] {r['name']}", "risk": r["risk"]} for r in tri_B] + \
+            [{"name": f"[Disposition] {r['name']}", "risk": r["risk"]} for r in disp_B]
+
+    B_targets = [lo, (lo+hi)/2, hi]
+    B_rows = []
+    for t in B_targets:
+        if not B_all: break
+        i_best = min(range(len(B_all)), key=lambda i: abs(float(B_all[i]["risk"]) - t))
+        r = B_all.pop(i_best)
+        r_clipped = _clip_to_band(r["risk"])
+        B_rows.append({"name": r["name"], "risk": r_clipped, "pos": _pos_in_band(r_clipped)})
+
+    st.caption(f"Band: {_pct(lo)}%–{_pct(hi)}% (all values shown are constrained to this interval).")
+    st.table({
+        "Perturbation / Context":[r["label"] for r in A_rows],
+        "Risk %":[_format_pct(r["risk"]) for r in A_rows],
+        "Position in band":[r["pos"] for r in A_rows],
+    })
+    st.table({
+        "Model/Policy":[r["name"] for r in B_rows],
+        "Risk %":[_format_pct(r["risk"]) for r in B_rows],
+        "Position in band":[r["pos"] for r in B_rows],
+    })
+
+# ── Decisive inputs chips (concise) ────────────────────────────────────────────
+def _decisive_inputs(patient):
+    chips = []
+    v = patient.get("vitals", {}); ri = patient.get("risk_inputs", {})
+    try:
+        sbp = int(str(v.get("BP","").split("/")[0]))
+        if sbp >= 140: chips.append("SBP ≥140")
+        elif sbp <= 90: chips.append("SBP ≤90")
+    except Exception: pass
+    try:
+        hr = int(v.get("HR", 0))
+        if hr >= 100: chips.append("HR ≥100")
+        elif hr <= 50: chips.append("HR ≤50")
+    except Exception: pass
+    try:
+        spo = int(v.get("SpO2", 0))
+        if spo and spo < 94: chips.append("SpO₂ <94%")
+    except Exception: pass
+    if ri.get("ecg_abnormal"): chips.append("ECG abnormal")
+    tro = ri.get("troponin")
+    if isinstance(tro,(int,float)) and tro is not None:
+        if tro >= 0.04: chips.append("hs-cTn ≥0.04")
+        elif tro >= 0.01: chips.append("hs-cTn ≥0.01")
+    pf = {str(p).lower() for p in ri.get("pain_features", [])}
+    if "radiating" in pf: chips.append("Radiating pain")
+    if "crushing" in pf: chips.append("Crushing pressure")
+    onset = patient.get("data_quality",{}).get("time_from_onset_min")
+    if isinstance(onset,int) and onset <= 90: chips.append("Early (≤90 min)")
+    return chips
+
+# ── Unified uncertainty panel (popover) ────────────────────────────────────────
 def _render_ua_panel():
     summary = st.session_state.get("_ua_summary")
     patient = st.session_state.get("_ua_patient")
@@ -222,10 +262,10 @@ def _render_ua_panel():
     if not summary or not patient:
         st.info("No uncertainty data available."); return
 
-    # Block header
+    # Header
     st.subheader("Evidence & Reasoning")
 
-    # Risk + interval + pathway chips
+    # Risk + interval
     base = float(summary["base"]); lo = float(summary["lo"]); hi = float(summary["hi"]); width = float(summary["width"])
     base_pct, lo_pct, hi_pct = _pct(base), _pct(lo), _pct(hi)
     band = band_from_risk(base)
@@ -233,20 +273,24 @@ def _render_ua_panel():
     band_badge = f"<span style='display:inline-block;border-radius:999px;padding:3px 10px;background:{band_color};color:white;font-weight:800'>{band}</span>"
     st.markdown(
         f"<div style='display:flex;gap:.5rem;flex-wrap:wrap;align-items:center'>"
-        f"<div><b>Risk:</b> {base_pct}%</div>{band_badge}"
-        f"</div>", unsafe_allow_html=True
-    )
+        f"<div><b>Risk:</b> {base_pct}%</div>{band_badge}</div>", unsafe_allow_html=True)
     st.caption(f"Risk interval {lo_pct}%–{hi_pct}% · Wider = less stable. Details in the tables below.")
 
-    # Pathway suggestion chips (from scenario)
+    # Pathway suggestion chips
     pathways = st.session_state.get("_PATHWAYS", {}).get(pid, ["ACS"])
-    chip_html = "".join([f"<span style='border-radius:999px;padding:.2rem .6rem;border:1px solid #e5e7eb;background:#f8fafc;font-weight:700;margin-right:.25rem'>{escape(p)}</span>" for p in pathways])
-    st.markdown(f"<div style='margin:.25rem 0'><b>Pathway suggestion:</b> {chip_html}</div>", unsafe_allow_html=True)
+    chips_html = "".join([f"<span style='border-radius:999px;padding:.2rem .6rem;border:1px solid #e5e7eb;background:#f8fafc;font-weight:700;margin-right:.25rem'>{escape(p)}</span>" for p in pathways])
+    st.markdown(f"<div style='margin:.25rem 0'><b>Pathway suggestion:</b> {chips_html}</div>", unsafe_allow_html=True)
 
-    # Overall confidence (aggregated across layers)
-    alea_pct, epis_pct, tri_conf_raw, _ = decompose_uncertainty(summary, patient)
+    # Decisive inputs — always render
+    dec = _decisive_inputs(patient)
+    if not dec:
+        dec = ["No decisive inputs detected"]
+    dhtml = "".join([f"<span style='border:1px solid #e5e7eb;background:#f3f4f6;border-radius:999px;padding:.2rem .55rem;margin:.2rem .25rem .1rem 0;font-weight:700'>{escape(c)}</span>" for c in dec])
+    st.markdown(f"<div><b>Decisive inputs:</b> {dhtml}</div>", unsafe_allow_html=True)
+
+    # Aggregated overall confidence (risk → triage → disposition → steps)
+    _, _, tri_conf_raw, _ = decompose_uncertainty(summary, patient)
     tri_conf = _nudge(pid, "tri", min(0.99, tri_conf_raw))
-    # cascade reduces downstream confidence
     disp_conf = _nudge(pid, "dispo", max(0.15, tri_conf * (1 - 0.80 * st.session_state.get('_SCENARIOS',{}).get(pid,{}).get('cascade',0.0))))
     steps_conf = _nudge(pid, "steps", 0.50 * (tri_conf + disp_conf))
     conf_overall = min(tri_conf, disp_conf, steps_conf)
@@ -259,11 +303,14 @@ def _render_ua_panel():
         f"</div>", unsafe_allow_html=True
     )
 
-    # Composition pie (data gaps, familiarity, stability, human ambiguity)
+    # Uncertainty composition
     dq = patient.get("data_quality", {}) or {}
     missing = dq.get("missing", []) or []
     ood = 1.0 if dq.get("ood") else 0.0
     human_vague = 0.0 if len((patient.get("chief_complaint") or "")) >= 12 else 1.0
+    if pid == "CP-1001":  # explicit ambiguous narrative
+        human_vague = 1.0
+
     w_data = min(1.0, 0.45 * len(missing))
     w_fam  = 0.60 * ood
     w_stab = max(0.0, (width - 0.10) / 0.25)
@@ -294,10 +341,85 @@ def _render_ua_panel():
             unsafe_allow_html=True
         )
 
+    # Prediction stability — DETAILS (two tables)
     st.markdown("#### Prediction stability — details")
     st.caption("Input perturbations + model/policy variation that populate the interval.")
-    _stability_table("triage", summary, patient)
-    _stability_table("disposition", summary, patient)
+    _stability_tables_overall(summary, patient)
+
+    # Pathway-aware Next steps (lives in drawer) — align with main AI recs and dedupe
+    steps = list(st.session_state.get("_ai_steps") or summary.get("steps") or [])
+    if not steps:
+        steps = [
+            "Possible NSTEMI — obtain hs-Troponin now",
+            "Repeat hs-Troponin per rule-out protocol",
+            "Continuous ECG & vitals",
+            "Reassess chest pain in 1–2 h",
+        ]
+
+    # Add pathway-specific actions
+    pathways = st.session_state.get("_PATHWAYS", {}).get(pid, [])
+    pset = {p.lower() for p in pathways}
+    if any("pe" in p for p in pset):
+        steps += [
+            "Consider PE pathway — D-dimer if low/mod pretest; CTPA if high.",
+            "Assess Wells/Geneva score to stratify PE likelihood."
+        ]
+    if any("infection" in p or "sepsis" in p for p in pset):
+        steps += [
+            "Consider infection pathway — CBC, CRP, lactate; cultures if febrile.",
+            "Chest X-ray if respiratory symptoms; start sepsis screen if indicated."
+        ]
+    if any("msk" in p for p in pset):
+        steps += ["Consider MSK pathway — palpation/ROM exam; NSAID trial if appropriate."]
+    if any("anxiety" in p for p in pset):
+        steps += ["Consider anxiety pathway — brief screening + reassurance; outpatient follow-up."]
+
+    # De-duplicate while preserving order
+    seen = set()
+    steps = [s for s in steps if not (s in seen or seen.add(s))]
+
+    def _tag_for(s: str):
+        s_l = s.lower()
+        if any(k in s_l for k in ["obtain","complete","repeat","rule-out","prioritize","re-test","d-dimer","ctpa","x-ray","cbc","lactate","cultures"]):
+            return "Uncertainty-reduction", "#FEF3C7", "#F59E0B"
+        if any(k in s_l for k in ["consult","monitor","review","reassess","continuous","protocol","analgesia","oxygen","reassurance","follow-up","trial"]):
+            return "Care step", "#E0E7FF", "#6366F1"
+        if any(k in s_l for k in ["consider pe","consider infection","consider sepsis","consider msk","consider anxiety","pathway"]):
+            return "Pathway-shift", "#F0FDF4", "#22C55E"
+        return "Care step", "#E0E7FF", "#6366F1"
+
+    # Header text per request: remove "with tags"
+    st.markdown("#### Next steps")
+
+    # confidence lift projection for uncertainty-reduction actions
+    cur_conf_pct = int(round(100*conf_overall))
+    def _project_conf_after(tag: str, s_text: str, base_conf: float):
+        if tag != "Uncertainty-reduction":
+            return base_conf, 0
+        lift = 0.04
+        s_low = s_text.lower()
+        if "troponin" in s_low or "biomarker" in s_low or "rule-out" in s_low:
+            lift = 0.08
+        elif "repeat" in s_low or "re-test" in s_low or "ecg" in s_low:
+            lift = 0.06
+        new_conf = max(base_conf, min(0.99, base_conf + lift))
+        delta_pts = int(round(100 * (new_conf - base_conf)))
+        return new_conf, delta_pts
+
+    for s in steps:
+        tag, bg, bd = _tag_for(s)
+        proj_conf, dpts = _project_conf_after(tag, s, conf_overall)
+        extra = ""
+        if dpts > 0:
+            extra = f"<span style='margin-left:.4rem;font-size:12px;color:#065f46'>→ Confidence +{dpts} pts (≈ {cur_conf_pct}% → {int(round(100*proj_conf))}%)</span>"
+        st.markdown(
+            f"<div style='display:flex;align-items:center;gap:.5rem;margin:.25rem 0;'>"
+            f"<span style='border-radius:999px;padding:.35rem .7rem;background:#f3f4f6;border:1px solid #e5e7eb;"
+            f"font-weight:700;font-size:12px;color:#111827'>{escape(s)}</span>"
+            f"<span style='border-radius:999px;padding:.3rem .6rem;background:{bg};border:1px solid {bd};"
+            f"font-weight:800;font-size:12px;color:#111827'>{tag}</span>{extra}</div>",
+            unsafe_allow_html=True
+        )
 
 # ── Page renderer ──────────────────────────────────────────────────────────────
 def render_patient_chart():
@@ -321,12 +443,12 @@ def render_patient_chart():
                     "HR":88,"SBP":132,"SpO₂":97,"TempC":36.9,"ECG":"Abnormal","hs-cTn (ng/L)":0.012,
                     "OnsetMin":70,"CC":"Intermittent chest pressure at rest, now mild.","Arrival":"Walk-in"},
     }
-    # Scenario mapping (base risk, stability, cascade) + pathway suggestions
+    # Scenario mapping (base risk, stability, cascade) + pathways
     SCENARIOS = {
         "CP-1000": {"base_pct": 12, "stability": "High",   "cascade": 0.00},  # A
-        "CP-1001": {"base_pct": 28, "stability": "Medium", "cascade": 0.05},  # B (missing troponin + vague)
-        "CP-1002": {"base_pct": 41, "stability": "Low",    "cascade": 0.20},  # C (mixed PE/infection + OOD)
-        "CP-1003": {"base_pct": 33, "stability": "Medium", "cascade": 0.15},  # E (threshold sensitive)
+        "CP-1001": {"base_pct": 28, "stability": "Medium", "cascade": 0.05},  # B
+        "CP-1002": {"base_pct": 41, "stability": "Low",    "cascade": 0.20},  # C
+        "CP-1003": {"base_pct": 33, "stability": "Medium", "cascade": 0.15},  # E
     }
     PATHWAYS = {
         "CP-1000": ["ACS"],
@@ -421,16 +543,15 @@ def render_patient_chart():
     with tabs[2]: st.caption("No additional labs/imaging in this demo.")
 
     # Summary (manual width mapping per scenario)
-    manual = simple_summary_from_manual(scen.get("base_pct", 25), scen.get("stability", "Medium"), patient)
-    summary = manual
+    summary = simple_summary_from_manual(scen.get("base_pct", 25), scen.get("stability", "Medium"), patient)
     st.session_state["_ua_summary"] = summary
     st.session_state["_ua_patient"] = patient
 
-    # ======== AI Recommendations ========
-    st.markdown("### AI Recommendations")
-    hdr = st.columns([0.90, 0.10])
-    # Popover drawer beside the "?" button (fallback to old drawer if popover unavailable)
-    with hdr[1]:
+    # ======== AI Recommendations (header + ? on one line) ========
+    row = st.columns([0.90, 0.10])
+    with row[0]:
+        st.markdown("### AI Recommendations")
+    with row[1]:
         try:
             with st.popover("❓", use_container_width=True, help="Why these recommendations? Confidence, intervals, uncertainty composition."):
                 _render_ua_panel()
@@ -479,17 +600,11 @@ def render_patient_chart():
             </div>
             """, unsafe_allow_html=True)
 
-    # Disposition (show ALL four options, highlight default)
+    # Disposition (show ALL four options; no pill tags inside items)
     st.divider()
     disp_pct = _DISPO_BASE_PCT.get(sel_id, int(round(100*summary["base"])))
     disp_default = _dispo_label_from_pct(disp_pct)
-    st.markdown(
-        f"""
-        <div class="ua-line" style="margin-top:.2rem">
-        <span class="ua-label">AI Disposition Recommendation:</span>
-        <span class="ua-badge">{escape(disp_default)}</span>
-        </div>
-        """, unsafe_allow_html=True)
+    st.markdown(f"<div class='ua-line' style='margin-top:.2rem'><span class='ua-label'>AI Disposition Recommendation:</span> <span class='ua-badge'>{escape(disp_default)}</span></div>", unsafe_allow_html=True)
 
     dispo_defs = [
         ("Confirm/Admit", "Admit or confirm acute management plan — likely inpatient treatment."),
@@ -505,7 +620,6 @@ def render_patient_chart():
                         border:1px solid {'#3B82F6' if is_ai else '#e5e7eb'};
                         background:{'#EEF2FF' if is_ai else 'white'};
                         border-radius:10px;padding:10px 12px;">
-              <div style="margin-top:1px"><span class="ua-badge">{escape(lab)}</span></div>
               <div style="flex:1">
                 <span style='color:#111827;font-weight:700'>{escape(lab)}</span><br>
                 <span style='color:#6b7280;font-size:13px'>{escape(desc)}</span>
@@ -513,7 +627,7 @@ def render_patient_chart():
             </div>
             """, unsafe_allow_html=True)
 
-    # Next steps (plain suggestions only; tags live in the drawer)
+    # Next steps (plain; tags live in drawer)
     st.divider()
     ai_steps = list(summary.get("steps") or [
         "Possible NSTEMI — obtain hs-Troponin now",
@@ -521,6 +635,9 @@ def render_patient_chart():
         "Continuous ECG & vitals",
         "Reassess chest pain in 1–2 h",
     ])
+    # Save for drawer to align & dedupe
+    st.session_state["_ai_steps"] = list(ai_steps)
+
     st.markdown("**AI Next-Steps Suggestions**")
     st.caption("Check a box to indicate you agree/accept that AI suggestion. Unchecked = not accepted.")
     for i, step in enumerate(ai_steps):
@@ -539,7 +656,7 @@ def render_patient_chart():
                  height=160, key="clin_notes")
     st.button("Save", type="primary", key="save_btn")
 
-    # Fallback right-side drawer (only if popover path not available/used)
+    # Fallback sidebar drawer if popover not available
     if st.session_state.get("ua_open"):
         _, right_col = _drawer_cols(True)
         with right_col:
