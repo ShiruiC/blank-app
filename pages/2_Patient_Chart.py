@@ -122,7 +122,6 @@ def _disposition_threshold(patient) -> float:
     return max(0.12, thr)
 
 def _dispo_base_prob_from_inputs(ri: dict, patient) -> float:
-    # independent mapping from raw inputs → disposition probability
     r = toy_risk_model(ri)                      # feature-derived risk (not the triage summary)
     thr = _disposition_threshold(patient)
     return _sigmoid(10.0 * (r - thr))
@@ -145,9 +144,9 @@ def _dispo_input_perturbations(patient, summary):
     # ECG re-interpretation
     r4 = dict(base_ri); r4["ecg_abnormal"] = not r4.get("ecg_abnormal", False); _try("ECG re-read (toggle)", r4)
 
-    # Operational/social contexts (independent toggles)
-    r5 = dict(base_ri); _try("Observation unit capacity available", r5)              # neutral baseline
-    r6 = dict(base_ri); _try("No observation capacity (ops constraint)", r6)         # same risk; visual only
+    # Operational/social contexts (visual toggles; same risk)
+    r5 = dict(base_ri); _try("Observation unit capacity available", r5)
+    r6 = dict(base_ri); _try("No observation capacity (ops constraint)", r6)
     r7 = dict(base_ri); _try("Strong home support (safe follow-up)", r7)
     return A
 
@@ -222,7 +221,7 @@ def _stability_tables_overall(summary, patient):
         "Risk %":[_format_pct(r["risk"]) for r in B_rows],
     })
 
-# ── Decisive inputs chips (guaranteed for CP-1000 via fallbacks) ───────────────
+# ── Decisive inputs chips (guaranteed for low-risk via fallbacks) ──────────────
 def _decisive_inputs(patient):
     chips = []
     v = patient.get("vitals", {}); ri = patient.get("risk_inputs", {})
@@ -242,7 +241,7 @@ def _decisive_inputs(patient):
     except Exception: pass
 
     if ri.get("ecg_abnormal"): chips.append("ECG abnormal")
-    else: chips.append("ECG normal")  # fallback to ensure visible decisive input for low-risk cases
+    else: chips.append("ECG normal")
 
     tro = ri.get("troponin")
     if isinstance(tro,(int,float)) and tro is not None:
@@ -255,7 +254,6 @@ def _decisive_inputs(patient):
     if "radiating" in pf: chips.append("Radiating pain")
     if "crushing" in pf: chips.append("Crushing pressure")
 
-    # young age fallback (ensures CP-1000 surfaces something decisive)
     try:
         if int(ri.get("age", patient.get("age", 0))) < 30:
             chips.append("Young age <30")
@@ -290,30 +288,46 @@ def _render_ua_panel():
     if not summary or not patient:
         st.info("No uncertainty data available."); return
 
-    # Header
-    st.subheader("Evidence & Reasoning")
+    # Title
+    st.subheader("Evidence & Uncertainty")
 
-    # Risk + interval
+    # Patient Risk with band bar (interval + marker + tier chip)
     base = float(summary["base"]); lo = float(summary["lo"]); hi = float(summary["hi"]); width = float(summary["width"])
     base_pct, lo_pct, hi_pct = _pct(base), _pct(lo), _pct(hi)
     band = band_from_risk(base)
-    band_color = {"Low":"#10B981","Low-Moderate":"#22C55E","Moderate":"#F59E0B","High":"#DC2626"}.get(band, "#6b7280")
-    band_badge = f"<span style='display:inline-block;border-radius:999px;padding:3px 10px;background:{band_color};color:white;font-weight:800'>{band}</span>"
-    st.markdown(
-        f"<div style='display:flex;gap:.5rem;flex-wrap:wrap;align-items:center'>"
-        f"<div><b>Risk:</b> {base_pct}%</div>{band_badge}</div>", unsafe_allow_html=True)
-    st.caption(f"Risk interval {lo_pct}%–{hi_pct}% · Wider = less stable. Details in the tables below.")
+    tier_color = {"Low":"#10B981","Low-Moderate":"#22C55E","Moderate":"#F59E0B","High":"#DC2626"}.get(band, "#6b7280")
+    tier_badge = f"<span style='display:inline-block;border-radius:999px;padding:3px 10px;background:{tier_color};color:white;font-weight:800'>{band}</span>"
+
+    # Band bar HTML
+    bar_html = f"""
+    <div style="margin:.2rem 0 .1rem 0"><b>Patient Risk:</b> {base_pct}%</div>
+    <div style="position:relative;height:16px;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:999px;">
+      <div style="
+        position:absolute;left:{lo_pct}%;width:{max(1, hi_pct-lo_pct)}%;
+        top:-1px;bottom:-1px;border-radius:999px;
+        background:linear-gradient(90deg,#10B981 0%, #22C55E 35%, #F59E0B 60%, #DC2626 100%);
+        opacity:.85;"></div>
+      <div title="Point estimate" style="
+        position:absolute;left:{base_pct}%;top:-5px;width:0;height:0;">
+        <div style="transform:translateX(-50%);width:10px;height:10px;background:#111827;border:2px solid white;border-radius:50%"></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:.5rem;align-items:center;margin-top:.25rem">
+      <span style="color:#6b7280;font-size:12px">Interval {lo_pct}%–{hi_pct}%</span>{tier_badge}
+    </div>
+    """
+    st.markdown(bar_html, unsafe_allow_html=True)
 
     # Pathway suggestion chips — percentages
     chips_html, pathway_names = _pathway_badges(pid)
-    st.markdown(f"<div style='margin:.25rem 0'><b>Pathway suggestion:</b> {chips_html}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='margin:.35rem 0'><b>Pathway suggestion:</b> {chips_html}</div>", unsafe_allow_html=True)
 
-    # Decisive inputs (guaranteed)
+    # Decisive inputs
     dec = _decisive_inputs(patient)
     dhtml = "".join([f"<span style='border:1px solid #e5e7eb;background:#f3f4f6;border-radius:999px;padding:.2rem .55rem;margin:.2rem .25rem .1rem 0;font-weight:700'>{escape(c)}</span>" for c in dec])
     st.markdown(f"<div><b>Decisive inputs:</b> {dhtml}</div>", unsafe_allow_html=True)
 
-    # Overall confidence
+    # AI Confidence
     _, _, tri_conf_raw, _ = decompose_uncertainty(summary, patient)
     tri_conf = _nudge(pid, "tri", min(0.99, tri_conf_raw))
     disp_conf = _nudge(pid, "dispo", max(0.15, tri_conf * (1 - 0.80 * st.session_state.get('_SCENARIOS',{}).get(pid,{}).get('cascade',0.0))))
@@ -322,18 +336,18 @@ def _render_ua_panel():
     conf_tier = _tier_from_conf(conf_overall); conf_pct = int(round(100*conf_overall))
     pill_bg = {"High":"#16a34a","Medium":"#f59e0b","Low":"#f97316"}[conf_tier]
     st.markdown(
-        f"<div style='display:flex;align-items:center;gap:.5rem;flex-wrap:wrap'>"
-        f"<div style='font-size:20px;font-weight:900'>Confidence: {conf_pct}%</div>"
+        f"<div style='display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-top:.25rem'>"
+        f"<div style='font-size:20px;font-weight:900'>AI Confidence: {conf_pct}%</div>"
         f"<span style='display:inline-block;border-radius:999px;padding:3px 10px;background:{pill_bg};color:white;font-weight:800'>{conf_tier}</span>"
         f"</div>", unsafe_allow_html=True
     )
 
-    # Uncertainty composition (detailed model familiarity note for OOD)
+    # Uncertainty contributors — stacked bar (share of uncertainty)
     dq = patient.get("data_quality", {}) or {}
     missing = dq.get("missing", []) or []
     ood = 1.0 if dq.get("ood") else 0.0
     human_vague = 0.0 if len((patient.get("chief_complaint") or "")) >= 12 else 1.0
-    if pid == "CP-1001":  # explicit ambiguous narrative
+    if pid == "CP-1001":
         human_vague = 1.0
 
     fam_note = "Typical for training distribution"
@@ -351,29 +365,43 @@ def _render_ua_panel():
     w_fam  = 0.60 * ood
     w_stab = max(0.0, (width - 0.10) / 0.25)
     w_human = 0.40 * human_vague
-    raw = [w_data, w_fam, w_stab, w_human]; total = sum(raw) or 1.0
-    pct4 = [int(round(100*x/total)) for x in raw]; pct4[0] += (100 - sum(pct4))
-    p0, p1, p2, p3 = pct4
-    css = ( "background: conic-gradient("
-            "#f59e0b 0 {a}%, #6366f1 {a}% {b}%, #22c55e {b}% {c}%, #e11d48 {c}% 100%);" ).format(
-        a=p0, b=p0+p1, c=p0+p1+p2)
-    st.markdown(f"<div style='width:110px;height:110px;border-radius:50%;margin:6px 0;{css}'></div>", unsafe_allow_html=True)
-    for lab, pct, note, col in zip(
-        ["Data gaps","Model familiarity","Prediction stability","Human ambiguity"],
-        pct4,
-        [
-            ("Missing: " + ", ".join(missing)) if missing else "No key inputs missing",
-            fam_note,
-            f"Risk interval width ≈ {int(round(100*width))} pts, indicating {'High' if width<=0.10 else ('Medium' if width<=0.20 else 'Low')} stability; details below.",
-            "Narrative unclear" if human_vague else "Narrative clear",
-        ],
-        ["#f59e0b","#6366f1","#22c55e","#e11d48"]
-    ):
+    raw = [w_data, w_fam, w_stab, w_human]
+    total = sum(raw) or 1.0
+    shares = [x/total for x in raw]  # relative shares (no % label by default)
+
+    labels = ["Data gaps","Model familiarity","Prediction stability","Human ambiguity"]
+    colors = ["#f59e0b","#6366f1","#22c55e","#e11d48"]
+    notes  = [
+        ("Missing: " + ", ".join(missing)) if missing else "No key inputs missing",
+        fam_note,
+        f"Interval width ≈ {int(round(100*width))} pts; wider = less stable.",
+        "Narrative unclear" if human_vague else "Narrative clear",
+    ]
+
+    st.markdown("<div style='margin-top:.5rem;font-weight:800'>Uncertainty contributors <span style='color:#6b7280;font-weight:600'>(share of uncertainty; not equal to AI Confidence)</span></div>", unsafe_allow_html=True)
+
+    # stacked bar container
+    segs = []
+    for sh, col, lab, note in zip(shares, colors, labels, notes):
+        w = max(1, int(round(100*sh)))
+        segs.append(
+            f"<div title='{escape(lab)} — {escape(note)}' "
+            f"style='width:{w}%;background:{col};height:14px'></div>"
+        )
+    st.markdown(
+        "<div style='display:flex;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;height:14px;margin:.3rem 0 0 .0rem'>"
+        + "".join(segs) +
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+    # legend lines with notes (keeps the “what & why” visible)
+    for lab, col, note in zip(labels, colors, notes):
         st.markdown(
-            f"<div style='display:flex;gap:.5rem;align-items:flex-start;margin:.15rem 0'>"
+            f"<div style='display:flex;gap:.5rem;align-items:flex-start;margin:.20rem 0'>"
             f"<span style='width:10px;height:10px;background:{col};border-radius:2px;margin-top:4px'></span>"
-            f"<div><b>{escape(lab)}</b> — {pct}%"
-            f"<div style='color:#6b7280;font-size:12px'>{escape(note)}</div></div></div>",
+            f"<div><b>{escape(lab)}</b><div style='color:#6b7280;font-size:12px'>{escape(note)}</div></div>"
+            f"</div>",
             unsafe_allow_html=True
         )
 
@@ -382,7 +410,7 @@ def _render_ua_panel():
     st.caption("Input perturbations + model/policy variation that populate the interval.")
     _stability_tables_overall(summary, patient)
 
-    # Next steps (aligned with pathways)
+    # Pathway-aware Next steps (aligned)
     steps = list(st.session_state.get("_ai_steps") or summary.get("steps") or [])
     _, pathway_names = _pathway_badges(pid)
     pset = {p.lower() for p in pathway_names}
