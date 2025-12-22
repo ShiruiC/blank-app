@@ -1,6 +1,6 @@
 # 🎈 Uncertainty-aware AI system in ED
 
-This is the prototype for the thesis: Developing an Uncertainty-Aware Ex-plainable Clinical Decision Support Sys-tem Prototype: A Design Science Ap-proach
+This is the prototype for the thesis: Developing an Uncertainty-Aware Ex-plainable Clinical Decision Support System Prototype: A Design Science Approach
 
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
 
