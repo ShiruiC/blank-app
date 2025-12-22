@@ -172,7 +172,7 @@ def _nearest_k(rows, targets, k):
             used.add(i); picked.append(r)
     return picked
 
-# ── Merge BOTH layers into two tables total (A: input changes; B: model/policy)
+# ── BOTH layers into two tables total (A: input changes; B: model/policy)
 #    Ensure rows are inside the current risk interval; no “Position in band”.
 def _stability_tables_overall(summary, patient):
     lo, hi = float(summary["lo"]), float(summary["hi"])

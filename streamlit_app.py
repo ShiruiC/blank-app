@@ -28,7 +28,7 @@ st.divider()
 
 # ---- Attention needed (AI–Clinician disagreement) ----
 st.subheader("Attention needed — AI–Clinician Decision Mismatch")
-# Pull from session state if you already populate it elsewhere; otherwise use a harmless placeholder.
+# Pull from session state if already populate it elsewhere; otherwise use a harmless placeholder.
 mismatches = st.session_state.get(
     "decision_mismatches",
     [

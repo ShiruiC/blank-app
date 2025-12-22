@@ -119,7 +119,7 @@ def render_sidebar(current_file: str):
     if target_path and os.path.basename(target_path) != current_base:
         st.switch_page(target_path)
 
-# ---------------- 下面保留你的数据与其它函数 ----------------
+# ---------------- 保留的数据与其它函数 ----------------
 def make_trackboard_data():
     rows = [
         dict(Room="WRM", Patient="Brown, Beverly", AgeSex="18 y/o • F", Complaint="Knee pain", Acuity="Level 4",

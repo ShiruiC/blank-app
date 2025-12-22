@@ -1,6 +1,6 @@
 # 🎈 Uncertainty-aware AI system in ED
 
-A simple Streamlit app template for you to modify!
+This is the prototype for the thesis: Developing an Uncertainty-Aware Ex-plainable Clinical Decision Support Sys-tem Prototype: A Design Science Ap-proach
 
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
 
@@ -29,6 +29,5 @@ uncertaintyproject/
    ├─ 2_Patient_Chart.py
    ├─ 3_Registration.py
    ├─ 4_Visits_and_Complaints.py
-   ├─ 5_Patient_Acuity.py
-   ├─ 6_ED_Disposition.py
-   └─ 7_ED_Triage_Notes.py
+   ├─ 5_Clinical_Decision_Log.py
+   ├─ 6_Audit_Log.py
